@@ -137,11 +137,21 @@ function writeEnv(map) {
   fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
 }
 
-// Emit config.yaml from the active primary. provider="custom" selects any
-// OpenAI-compatible endpoint; api_key is referenced from .env via ${OPENAI_API_KEY}
-// (Hermes expands ${VAR} in config.yaml from its loaded .env).
-function writeConfig(primary) {
+// Normalize an mcp name into the .env var suffix used in config.yaml, e.g.
+// `avots` -> `MCP_AVOTS_KEY`, `my-github-mcp` -> `MCP_MY_GITHUB_MCP_KEY`.
+function mcpEnvName(name) {
+  return 'MCP_' + String(name || '').toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_KEY';
+}
+
+// Emit config.yaml from the panel state. The model block comes from the active
+// primary (provider="custom" selects any OpenAI-compatible endpoint; api_key is
+// referenced from .env via ${OPENAI_API_KEY}). Every ENABLED mcp in the state is
+// emitted under `mcp_servers:` with its Authorization header referencing a
+// per-mcp .env var (e.g. ${MCP_AVOTS_KEY}). Hermes expands ${VAR} in config.yaml
+// from its loaded .env.
+function writeConfig(state) {
   fs.mkdirSync(DATA_DIR, { recursive: true });
+  const primary = state && state.primary;
   const model = (primary && primary.model) || DEFAULT_MODEL;
   const baseURL = (primary && primary.baseURL) || PROVIDERS.avots.baseURL;
   const yaml = [
@@ -170,8 +180,23 @@ function writeConfig(primary) {
     '  at_hour: 4',
     'group_sessions_per_user: true',
     '',
-  ].join('\n');
-  fs.writeFileSync(CONFIG_FILE, yaml, { mode: 0o600 });
+  ];
+
+  // Remote MCP servers: one entry per ENABLED mcp. The key is referenced from
+  // .env so the secret never lands in config.yaml in plaintext.
+  const mcps = (state && state.mcps || []).filter((m) => m && m.enabled !== false);
+  if (mcps.length) {
+    yaml.push('mcp_servers:');
+    for (const m of mcps) {
+      yaml.push(`  ${m.name}:`);
+      yaml.push(`    url: "${m.url}"`);
+      yaml.push('    headers:');
+      yaml.push(`      Authorization: "Bearer \${${mcpEnvName(m.name)}}"`);
+    }
+    yaml.push('');
+  }
+
+  fs.writeFileSync(CONFIG_FILE, yaml.join('\n'), { mode: 0o600 });
 }
 
 // Signal the host applier: it watches this file via a systemd .path unit and
@@ -205,8 +230,17 @@ function applyAll(state, reason) {
   }
   if (dc) env.DISCORD_BOT_TOKEN = dc.token; else delete env.DISCORD_BOT_TOKEN;
 
+  // Per-mcp keys: drop any stale MCP_*_KEY first (so removed mcps don't linger),
+  // then set one for every enabled mcp from its stored full key.
+  for (const k of Object.keys(env)) {
+    if (/^MCP_[A-Z0-9_]+_KEY$/.test(k)) delete env[k];
+  }
+  for (const m of (state.mcps || []).filter((x) => x && x.enabled !== false)) {
+    if (m.apiKey) env[mcpEnvName(m.name)] = m.apiKey;
+  }
+
   writeEnv(env);
-  writeConfig(state.primary);
+  writeConfig(state);
   return touchApplyRequest(reason);
 }
 
@@ -220,7 +254,7 @@ module.exports = {
     primary: true,
     fallback: true,   // exposed; see addFallback TODO (no confirmed Hermes mapping yet)
     messaging: true,
-    mcp: true,        // exposed; see addMcp TODO (no confirmed Hermes mapping yet)
+    mcp: true,        // wired: addMcp writes mcp_servers + MCP_<NAME>_KEY env
     openProduct: false,
     preconnect: true,
   },
@@ -334,8 +368,10 @@ module.exports = {
     return { ok: apply.ok, restart: apply };
   },
 
-  // MCP: no confirmed Hermes mechanism on this VM build. Record in panel-state so
-  // the UI reflects it; the operator can wire it manually until upstream support.
+  // MCP: Hermes supports remote MCP servers in config.yaml under `mcp_servers`.
+  // We store the full key in panel-state and applyAll wires it into .env (as
+  // MCP_<NAME>_KEY) + config.yaml (mcp_servers.<name> with a Bearer header that
+  // references that env var). The agent picks it up on the next restart.
   async addMcp({ provider, apiKey, name: customName, url: customUrl }) {
     if (!MCPS[provider]) return { error: 'unknown mcp' };
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
@@ -351,13 +387,12 @@ module.exports = {
       name = provider; url = MCPS[provider].url;
     }
     const st = loadState();
-    st.mcps = (st.mcps || []).concat([{ name, url, keyTail: apiKey.trim().slice(-3), enabled: true }]);
+    st.mcps = (st.mcps || []).concat([{ name, url, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), enabled: true }]);
     saveState(st);
     const apply = applyAll(st, 'add-mcp');
     return {
-      add: { ok: apply.ok, code: 0, stdout: `${name} recorded`, stderr: '' },
+      add: { ok: apply.ok, code: 0, stdout: `${name} connected`, stderr: '' },
       reload: apply,
-      todo: 'Hermes MCP wiring not confirmed for this VM; recorded in panel-state only.',
     };
   },
 

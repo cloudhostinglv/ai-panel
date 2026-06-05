@@ -511,7 +511,7 @@
           <input id="customModel" type="text" placeholder="e.g. llama-3.3-70b-versatile" data-i18n-ph="customModelIdPh" autocomplete="off" />
         </div>
 
-        <!-- Model picker — shared by the Avots Connect flow and the paste-key
+        <!-- Model picker · shared by the Avots Connect flow and the paste-key
              flow. Pulled OUT of #primaryKeyArea so it stays visible for the
              keyless "Connect Avots" path (which reads #primaryModel at click
              time and threads it through as ?model=). The price hint below is
@@ -969,11 +969,11 @@
 
     function priceFor(id) { return (id && PRICING[id]) || null; }
 
-    // Short price suffix for an <option> label, e.g. " — ~27⚡/msg".
+    // Short price suffix for an <option> label, e.g. " · ~27⚡/msg".
     function priceSuffix(id) {
       const p = priceFor(id);
       if (!p || p.per_message_est == null) return '';
-      return ` — ~${p.per_message_est}${ZAP}/msg`;
+      return ` · ~${p.per_message_est}${ZAP}/msg`;
     }
 
     async function loadPricing() {
@@ -991,11 +991,14 @@
       if (selectedPrimary === 'avots') { renderPrimaryModelOptions('avots'); syncAvotsPriceHint(); }
     }
 
-    // Populate the Primary-AI model <select> for a provider. The first model in
-    // the curated list is the default selection. A trailing "Custom model…"
-    // option reveals a free-form text input. For "custom" providers the picker
-    // is hidden (the Add-your-own modelId field IS the model picker there).
-    // For "avots", each option label is annotated with its per-message price.
+    // Populate the Primary-AI model <select> for a provider. A trailing
+    // "Custom model…" option reveals a free-form text input. For "custom"
+    // providers the picker is hidden (the Add-your-own modelId field IS the
+    // model picker there). For "avots", each option label is annotated with its
+    // per-message price and the options are SORTED by price descending (most
+    // expensive first); every other provider keeps the curated list order. The
+    // provider's default model (the first entry in the curated list) is always
+    // pre-selected, even when it is not first after the avots price sort.
     function renderPrimaryModelOptions(provider) {
       const area = $('primaryModelArea');
       const sel = $('primaryModel');
@@ -1007,11 +1010,23 @@
       area.hidden = false;
       free.hidden = true; free.value = '';
       const annotate = provider === 'avots';
+      // The curated default (first entry) stays the pre-selected model regardless
+      // of display order.
+      const defaultModel = list[0];
+      // Avots: order options by per-message price, most expensive first (models
+      // without a known price sort last). Others keep the curated order.
+      let ordered = list;
+      if (annotate) {
+        const est = (id) => { const p = priceFor(id); return (p && p.per_message_est != null) ? p.per_message_est : -Infinity; };
+        ordered = list.slice().sort((a, b) => est(b) - est(a));
+      }
       sel.innerHTML =
-        list.map(m => `<option value="${esc(m)}">${esc(m + (annotate ? priceSuffix(m) : ''))}</option>`).join('') +
+        ordered.map(m => `<option value="${esc(m)}">${esc(m + (annotate ? priceSuffix(m) : ''))}</option>`).join('') +
         `<option value="${CUSTOM_MODEL_VALUE}">${esc(T('primaryModelCustomOpt'))}</option>`;
-      // Preserve the prior selection across a re-render (e.g. after pricing loads).
-      sel.value = (prev && list.includes(prev)) ? prev : list[0];
+      // Preserve the prior selection across a re-render (e.g. after pricing
+      // loads); otherwise fall back to the curated default. Set explicitly so we
+      // never rely on first-option being the default after the avots sort.
+      sel.value = (prev && list.includes(prev)) ? prev : defaultModel;
     }
 
     // Small hint under the model picker for the SELECTED avots model: its use,
