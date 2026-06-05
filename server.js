@@ -213,6 +213,60 @@ app.post('/api/mcp', requireCap('mcp'), async (req, res) => {
   }
 });
 
+// === remove routes =========================================================
+// The "what's connected" lists in the UI render from status().configured and
+// each row has a trash button that POSTs here with the configured row's id. Each
+// route is gated by the SAME capability as its add counterpart and delegates to
+// the adapter; the UI re-runs loadStatus() afterwards to refresh the lists.
+
+// Remove the active primary AI.
+app.post('/api/primary/remove', requireCap('primary'), async (req, res) => {
+  const { id } = req.body || {};
+  try {
+    const r = await adapter.removePrimary(id);
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// Remove a saved fallback AI (by model id).
+app.post('/api/fallback/remove', requireCap('fallback'), async (req, res) => {
+  const { id } = req.body || {};
+  try {
+    const r = await adapter.removeFallback(id);
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// Disconnect a messaging channel (by channel id/type).
+app.post('/api/channel/remove', requireCap('messaging'), async (req, res) => {
+  const { id } = req.body || {};
+  try {
+    const r = await adapter.removeChannel(id);
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// Detach an MCP server (by name id).
+app.post('/api/mcp/remove', requireCap('mcp'), async (req, res) => {
+  const { id } = req.body || {};
+  try {
+    const r = await adapter.removeMcp(id);
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
 // === Feature 1: "Connect Avots" via OAuth 2.1 (DCR + PKCE) — keyless =======
 // avots issues a real `av_mcp_…` access_token that works for BOTH the
 // OpenAI-compatible API and MCP, so one browser login configures the whole

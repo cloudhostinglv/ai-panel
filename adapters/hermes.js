@@ -267,7 +267,9 @@ module.exports = {
 
   // Hermes has no status CLI reachable from the unprivileged panel. We synthesize
   // a status blob from panel-state.json shaped like the openclaw `models status`
-  // JSON the front-end already parses (resolvedDefault + fallbacks[]).
+  // JSON the front-end already parses (resolvedDefault + fallbacks[]). On top of
+  // that raw blob we ALSO return a clean structured `configured` object the UI
+  // renders the "what's connected" lists from (see the contract in openclaw.js).
   async status() {
     const st = loadState();
     const modelsJson = {
@@ -280,10 +282,30 @@ module.exports = {
     const mcpsJson = (st.mcps || [])
       .filter((x) => x.enabled !== false)
       .map((x) => ({ name: x.name, url: x.url }));
+
+    // Structured view for the UI lists. ids are the same values removeX() filters
+    // by: primary id = provider, fallback id = model, channel id = type, mcp id =
+    // name. Empty arrays / null where nothing is configured.
+    const configured = {
+      primary: st.primary
+        ? { id: st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model }
+        : null,
+      fallbacks: (st.fallbacks || [])
+        .filter((f) => f && f.enabled !== false)
+        .map((f) => ({ id: f.model, label: f.label, model: f.model })),
+      channels: (st.channels || [])
+        .filter((c) => c && c.enabled !== false)
+        .map((c) => ({ id: c.type, type: c.type, label: c.label })),
+      mcps: (st.mcps || [])
+        .filter((x) => x && x.enabled !== false)
+        .map((x) => ({ id: x.name, name: x.name, url: x.url })),
+    };
+
     return {
       models:   { ok: true, code: 0, stdout: JSON.stringify(modelsJson), stderr: '' },
       channels: { ok: true, code: 0, stdout: JSON.stringify(channelsJson), stderr: '' },
       mcps:     { ok: true, code: 0, stdout: JSON.stringify(mcpsJson), stderr: '' },
+      configured,
     };
   },
 
@@ -327,6 +349,17 @@ module.exports = {
       restart: apply,
       todo: 'Hermes fallback chain not confirmed for this VM; recorded in panel-state only.',
     };
+  },
+
+  // Remove a recorded fallback. The UI passes the fallback's model id (which is
+  // also what status().configured exposes as the fallback id), so filter by model
+  // (fall back to a stored id if one is ever present), persist, then re-apply.
+  async removeFallback(id) {
+    const st = loadState();
+    st.fallbacks = (st.fallbacks || []).filter((f) => f && f.model !== id && f.id !== id);
+    saveState(st);
+    const apply = applyAll(st, 'remove-fallback');
+    return { ok: apply.ok, restart: apply };
   },
 
   async setActivePrimary(/* id */) {

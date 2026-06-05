@@ -1203,6 +1203,76 @@
       setHidden('mcp-card', !cap.mcp);
     }
 
+    // Trash icon for the remove buttons (matches the button.remove styling in CSS).
+    const trashSvg = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>';
+
+    // Render one "what's connected" list into a .configured container. `items` is
+    // an array of { id, label, detail }. The container is hidden when the list is
+    // empty, otherwise shows a small title + one .item row per entry, each with a
+    // trash button that calls onRemove(id) (which POSTs then re-runs loadStatus).
+    function renderConfiguredList(containerId, title, items, removeUrl) {
+      const el = $(containerId); if (!el) return;
+      const list = Array.isArray(items) ? items.filter(Boolean) : [];
+      if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
+      el.hidden = false;
+      el.innerHTML =
+        `<div class="configured-title">${esc(title)}</div>` +
+        list.map((it) => {
+          const detail = it.detail ? `<span class="detail">${esc(it.detail)}</span>` : '';
+          return `<div class="item">` +
+            `<div class="meta"><span class="label">${esc(it.label)}</span>${detail}</div>` +
+            `<button class="remove" type="button" title="${esc(T('remove'))}" aria-label="${esc(T('remove'))}" ` +
+              `data-remove-url="${esc(removeUrl)}" data-remove-id="${esc(it.id)}">${trashSvg}</button>` +
+          `</div>`;
+        }).join('');
+    }
+
+    // Render all four connected-lists from status().configured. A primary AI row
+    // shows "<label> · <model>"; fallbacks show the same; channels show the channel
+    // label; MCPs show "<name> · <host>". Each list hides itself when empty.
+    function renderConfigured(cfg, cap) {
+      cfg = cfg || {};
+      // Primary AI (single row or hidden).
+      const primary = (cap.primary !== false && cfg.primary)
+        ? [{ id: cfg.primary.id, label: cfg.primary.label || cfg.primary.model || 'Primary AI', detail: cfg.primary.model || '' }]
+        : [];
+      renderConfiguredList('primaryConfigured', T('cfgActivePrimary'), primary, '/api/primary/remove');
+
+      // Fallback AI list.
+      const fallbacks = (cap.fallback !== false && Array.isArray(cfg.fallbacks))
+        ? cfg.fallbacks.map((f) => ({ id: f.id, label: f.label || f.model, detail: f.model || '' }))
+        : [];
+      renderConfiguredList('fallbacksConfigured', T('cfgSavedFallbacks'), fallbacks, '/api/fallback/remove');
+
+      // Messaging channels.
+      const channels = (cap.messaging !== false && Array.isArray(cfg.channels))
+        ? cfg.channels.map((c) => ({ id: c.id, label: c.label || c.type, detail: '' }))
+        : [];
+      renderConfiguredList('channelsConfigured', T('cfgConnectedChannels'), channels, '/api/channel/remove');
+
+      // MCP add-ons. Detail = the host part of the url (falls back to the url).
+      const mcps = (cap.mcp !== false && Array.isArray(cfg.mcps))
+        ? cfg.mcps.map((m) => {
+            let host = '';
+            try { host = m.url ? new URL(m.url).host : ''; } catch (_) { host = m.url || ''; }
+            return { id: m.id, label: m.name || m.id, detail: host };
+          })
+        : [];
+      renderConfiguredList('mcpConfigured', T('cfgConnectedMcps'), mcps, '/api/mcp/remove');
+    }
+
+    // Delegated handler for every trash button in a .configured list: POST the
+    // matching remove endpoint with the row id, then refresh both the lists and
+    // the Status card via loadStatus(). The button disables while in flight.
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button.remove'); if (!btn) return;
+      const url = btn.dataset.removeUrl, id = btn.dataset.removeId;
+      if (!url) return;
+      btn.disabled = true;
+      try { await post(url, { id }); } catch (_) {}
+      await loadStatus();
+    });
+
     async function loadStatus() {
       try {
         const s = await fetch('/api/status').then(r=>r.json());
@@ -1213,6 +1283,10 @@
         if (s.capabilities && s.capabilities.openProduct) return;
 
         const cap = (s.capabilities) || {};
+
+        // Render the per-section "what's connected" lists (with remove buttons)
+        // from the adapter's structured `configured` view.
+        renderConfigured(s.configured, cap);
 
         let model = '-', fallbacks = [];
         try {

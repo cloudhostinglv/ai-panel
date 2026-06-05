@@ -12,9 +12,13 @@
  *
  *   capabilities                              -> which UI sections apply
  *   openProductUrl()                          -> builders only (null for agents)
- *   status()                                  -> { models, channels } raw run() blobs
+ *   status()                                  -> { models, channels, mcps } raw run()
+ *                                                blobs + a structured `configured`
+ *                                                view ({primary, fallbacks, channels,
+ *                                                mcps}) the UI renders the lists from
  *   setPrimary(provider, apiKey, custom)      -> set the active primary LLM
  *   addFallback(provider, apiKey, custom)     -> push a fallback LLM
+ *   removeFallback(id)                        -> drop a fallback model from the chain
  *   setActivePrimary(id)                      -> switch active primary (TODO here)
  *   removePrimary(id)                         -> remove a saved primary (TODO here)
  *   addChannel(channel, token)               -> connect Telegram/Discord
@@ -138,7 +142,51 @@ module.exports = {
   async status() {
     const models = await run(OC, ['models', 'status', '--json']);
     const channels = await run(OC, ['channels', 'list', '--json']);
-    return { models, channels };
+    // MCPs: best-effort. `openclaw mcp list --json` may or may not exist on this
+    // build; if it errors we just leave the mcps list empty (the raw blob keeps
+    // the existing fields untouched).
+    const mcps = await run(OC, ['mcp', 'list', '--json']);
+
+    // Build the structured `configured` view the UI renders its lists from, in
+    // the same shape the hermes adapter returns. Best-effort: each piece is wrapped
+    // in its own try/catch so a single unparseable blob never blanks the others.
+    //   primary  : from models.resolvedDefault (id = model so removePrimary can match)
+    //   fallbacks: from models.fallbacks[] (id = model)
+    //   channels : from `channels list --json` (id = type)
+    //   mcps     : from `mcp list --json` if available (id = name)
+    const configured = { primary: null, fallbacks: [], channels: [], mcps: [] };
+    try {
+      const m = JSON.parse(models.stdout || '{}');
+      const def = m.resolvedDefault || m.defaultModel || null;
+      if (def) configured.primary = { id: def, provider: null, label: def, model: def };
+      const fbs = Array.isArray(m.fallbacks) ? m.fallbacks : [];
+      configured.fallbacks = fbs.map((f) => {
+        const model = (f && typeof f === 'object') ? (f.model || f.id || f.name) : f;
+        return { id: model, label: model, model };
+      }).filter((f) => f.model);
+    } catch (_) {}
+    try {
+      const list = JSON.parse(channels.stdout || '[]');
+      const arr = Array.isArray(list) ? list : (Array.isArray(list.channels) ? list.channels : []);
+      configured.channels = arr.map((c) => {
+        const type = (c && typeof c === 'object') ? (c.type || c.channel || c.id) : c;
+        const label = (c && typeof c === 'object' && c.label) ? c.label : (CHANNELS[type] || type);
+        return { id: type, type, label };
+      }).filter((c) => c.id);
+    } catch (_) {}
+    try {
+      if (mcps.ok) {
+        const list = JSON.parse(mcps.stdout || '[]');
+        const arr = Array.isArray(list) ? list : (Array.isArray(list.servers) ? list.servers : (Array.isArray(list.mcps) ? list.mcps : []));
+        configured.mcps = arr.map((x) => {
+          const name = (x && typeof x === 'object') ? (x.name || x.id) : x;
+          const url = (x && typeof x === 'object') ? (x.url || (MCPS[name] && MCPS[name].url)) : undefined;
+          return { id: name, name, url };
+        }).filter((x) => x.id);
+      }
+    } catch (_) {}
+
+    return { models, channels, mcps, configured };
   },
 
   // `model` (optional) overrides the provider's default model (`models set <model>`).
@@ -198,6 +246,18 @@ module.exports = {
   async removePrimary(/* id */)   { return { ok: true, todo: 'removePrimary not yet mapped for openclaw' }; },
   async removeChannel(/* id */)   { return { ok: true, todo: 'removeChannel not yet mapped for openclaw' }; },
   async removeMcp(/* id */)       { return { ok: true, todo: 'removeMcp not yet mapped for openclaw' }; },
+
+  // Remove a fallback model from the chain. Mirrors addFallback's
+  // `openclaw models fallbacks add <model>`; the remove subcommand flag name is
+  // assumed to be `remove` (verify against `openclaw models fallbacks --help` on
+  // the target build; some builds spell it `rm`/`delete`). `id` is the model id
+  // exactly as status().configured.fallbacks[].id reports it.
+  async removeFallback(id) {
+    if (!id || typeof id !== 'string') return { error: 'missing fallback id' };
+    const remove = await run(OC, ['models', 'fallbacks', 'remove', id.trim()]);
+    const restart = await restartGateway();
+    return { remove, restart, ok: remove.ok };
+  },
 
   async addChannel(channel, token) {
     if (!CHANNELS[channel]) return { error: 'unknown channel' };
