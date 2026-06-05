@@ -211,8 +211,9 @@ app.post('/api/mcp', requireCap('mcp'), async (req, res) => {
   }
 });
 
-app.listen(PORT, '127.0.0.1', () => {
-  console.log(`AI Panel (product=${PRODUCT}) listening on 127.0.0.1:${PORT}`);
+const HOST = process.env.PANEL_HOST || '0.0.0.0';  // 0.0.0.0 so Caddy (separate container) can reach panel:8080; set PANEL_HOST=127.0.0.1 for a native host deploy
+app.listen(PORT, HOST, () => {
+  console.log(`AI Panel (product=${PRODUCT}) listening on ${HOST}:${PORT}`);
   // Fire-and-forget the one-time avots auto-connect. Runs after the server is
   // up so the panel is reachable immediately even while this completes.
   preconnectAvots().catch((e) => console.error('[preconnect] unexpected error:', e));
