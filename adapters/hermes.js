@@ -37,10 +37,11 @@ const ENV_FILE = path.join(DATA_DIR, '.env');
 const APPLY_REQUEST = path.join(DATA_DIR, '.apply-request');
 // Native Hermes pairing: the agent persists pending approval requests under
 // <data>/pairing/<platform>-pending.json; the panel reads them to list who is
-// waiting and writes <data>/.pairing-request for the host applier to turn into
-// `hermes pairing approve <platform> <code>` (the panel can't exec the CLI).
+// waiting. NOTE: `hermes pairing approve` takes the USER-FACING code (hashed in
+// storage, so neither the panel nor `hermes pairing list` can supply it), so we
+// approve by USER ID instead via the platform allowlist (TELEGRAM_ALLOWED_USERS),
+// which is exactly what Hermes documents. The id is persisted in state.approved.
 const PAIRING_DIR = path.join(DATA_DIR, 'pairing');
-const PAIRING_REQUEST = path.join(DATA_DIR, '.pairing-request');
 const PAIRING_FILE_RE = /^([a-z_][a-z0-9_]{1,30})-pending\.json$/;
 
 const DEFAULT_MODEL = 'anthropic/claude-opus-4.8';
@@ -247,9 +248,12 @@ function applyAll(state, reason) {
   // Telegram is the canonical messaging channel; Discord is mapped too if added.
   const tg = (state.channels || []).find((c) => c.type === 'telegram');
   const dc = (state.channels || []).find((c) => c.type === 'discord');
+  const approved = (state.approved && typeof state.approved === 'object') ? state.approved : {};
   if (tg) {
     env.TELEGRAM_BOT_TOKEN = tg.token;
-    env.TELEGRAM_ALLOWED_USERS = tg.allowedUsers || '';
+    // Allowlist = the channel's allowedUsers PLUS anyone approved from the
+    // Access-requests queue (state.approved.telegram). Empty => Hermes denies all.
+    env.TELEGRAM_ALLOWED_USERS = mergeAllowed(tg.allowedUsers, approved.telegram);
   } else {
     delete env.TELEGRAM_BOT_TOKEN;
     delete env.TELEGRAM_ALLOWED_USERS;
@@ -309,21 +313,30 @@ function listPairing() {
 }
 
 const PAIRING_PLATFORM_RE = /^[a-z_]{2,20}$/;
-const PAIRING_CODE_RE = /^[a-f0-9]{6,64}$/;
+const PAIRING_USERID_RE = /^[A-Za-z0-9._:-]{1,64}$/;
 
-// Hand the host applier a pairing action via a tiny KEY=VALUE file (trivial +
-// injection-safe to parse in bash), then touch .apply-request so the existing
-// path unit fires. The applier validates again before exec'ing the CLI.
-function requestPairing(action, platform, code) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  const body =
-    `action=${action}\n` +
-    `platform=${platform}\n` +
-    `code=${code}\n` +
-    `ts=${new Date().toISOString()}\n`;
-  fs.writeFileSync(PAIRING_REQUEST, body, { mode: 0o600 });
-  touchApplyRequest(`pairing-${action}`);
-  return { ok: true, queued: true };
+// Drop a user's pending entries from <platform>-pending.json so the Access
+// requests card clears once they've been approved (best effort; the agent owns
+// this file but re-reads it on restart, which the approve triggers).
+function prunePending(platform, userId) {
+  const file = path.join(PAIRING_DIR, `${platform}-pending.json`);
+  let data;
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return; }
+  if (!data || typeof data !== 'object') return;
+  let changed = false;
+  for (const [k, e] of Object.entries(data)) {
+    if (e && String(e.user_id) === String(userId)) { delete data[k]; changed = true; }
+  }
+  if (changed) { try { fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 }); } catch (_) {} }
+}
+
+// Merge a comma-separated allowlist string with an array of approved ids,
+// de-duped, into the comma form Hermes reads from TELEGRAM_ALLOWED_USERS.
+function mergeAllowed(csv, extra) {
+  const set = new Set();
+  for (const x of String(csv || '').split(',')) { const v = x.trim(); if (v) set.add(v); }
+  for (const x of (Array.isArray(extra) ? extra : [])) { const v = String(x).trim(); if (v) set.add(v); }
+  return [...set].join(',');
 }
 
 module.exports = {
@@ -398,19 +411,37 @@ module.exports = {
   // List pending pairing requests (also surfaced inside status().pairing).
   listPairing() { return listPairing(); },
 
-  // Approve a pending pairing code (delegates to the host applier, which runs
-  // `hermes pairing approve <platform> <code>` inside the gateway container).
-  async approvePairing({ platform, code } = {}) {
+  // Approve a pending request by USER ID: add the id to the platform allowlist
+  // (persisted in state.approved so it survives config rewrites) and re-apply.
+  // The host applier restarts the gateway, which then admits that user. We can't
+  // use `hermes pairing approve <code>` because the code is the user-facing one,
+  // stored only as a salted hash; the allowlist-by-id is Hermes' documented path.
+  async approvePairing({ platform, userId } = {}) {
     if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
-    if (!PAIRING_CODE_RE.test(code || '')) return { error: 'invalid code' };
-    return requestPairing('approve', platform, code);
+    const uid = String(userId == null ? '' : userId).trim();
+    if (!PAIRING_USERID_RE.test(uid)) return { error: 'invalid user id' };
+    const st = loadState();
+    st.approved = (st.approved && typeof st.approved === 'object') ? st.approved : {};
+    st.approved[platform] = Array.isArray(st.approved[platform]) ? st.approved[platform] : [];
+    if (!st.approved[platform].includes(uid)) st.approved[platform].push(uid);
+    prunePending(platform, uid);
+    saveState(st);
+    const apply = applyAll(st, 'approve-user');
+    return { ok: apply.ok, queued: true, restart: apply };
   },
 
-  // Revoke an approved user (same applier path, `hermes pairing revoke`).
-  async revokePairing({ platform, code } = {}) {
+  // Revoke access: drop the id from the allowlist and re-apply.
+  async revokePairing({ platform, userId } = {}) {
     if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
-    if (!PAIRING_CODE_RE.test(code || '')) return { error: 'invalid code' };
-    return requestPairing('revoke', platform, code);
+    const uid = String(userId == null ? '' : userId).trim();
+    if (!PAIRING_USERID_RE.test(uid)) return { error: 'invalid user id' };
+    const st = loadState();
+    if (st.approved && Array.isArray(st.approved[platform])) {
+      st.approved[platform] = st.approved[platform].filter((x) => String(x) !== uid);
+    }
+    saveState(st);
+    const apply = applyAll(st, 'revoke-user');
+    return { ok: apply.ok, restart: apply };
   },
 
   async setPrimary(provider, apiKey, custom, model) {
