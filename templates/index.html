@@ -124,8 +124,9 @@
         <form id="telegram-form" class="stack">
           <label data-i="telegram_token_label">Bot token</label>
           <input type="text" id="tg_token" name="token" data-i-ph="telegram_token_ph" required>
-          <label data-i="telegram_owner_label">Your Telegram user id</label>
-          <input type="text" id="tg_owner" name="owner_id" data-i-ph="telegram_owner_ph">
+          <label data-i="telegram_allowed_label">Allowed Telegram user ids</label>
+          <input type="text" id="tg_allowed" name="allowed_users" data-i-ph="telegram_allowed_ph">
+          <p class="muted hint" data-i="telegram_allowed_hint"></p>
           <button type="submit" class="btn primary" data-i="telegram_save">Save Telegram settings</button>
           <p id="telegram-msg" class="form-msg" role="status"></p>
         </form>

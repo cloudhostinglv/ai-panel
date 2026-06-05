@@ -170,11 +170,11 @@
     form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       var token = document.getElementById("tg_token").value.trim();
-      var owner = document.getElementById("tg_owner").value.trim();
+      var allowed = document.getElementById("tg_allowed").value.trim();
       if (!token) { msg("telegram-msg", t("field_required"), false); return; }
       var body = new URLSearchParams();
       body.set("token", token);
-      body.set("owner_id", owner);
+      body.set("allowed_users", allowed);
       msg("telegram-msg", t("saving"), true);
       fetch("/api/telegram", {
         method: "POST",
@@ -184,7 +184,10 @@
       })
         .then(function (r) { return r.json(); })
         .then(function (d) {
-          if (d && d.ok) msg("telegram-msg", t("save_ok"), true);
+          if (d && d.ok) { msg("telegram-msg", t("save_ok"), true); return; }
+          var err = d && d.error;
+          if (err === "bad_token") msg("telegram-msg", t("telegram_bad_token"), false);
+          else if (err === "bad_allowed_users") msg("telegram-msg", t("telegram_bad_allowed"), false);
           else msg("telegram-msg", t("field_required"), false);
         })
         .catch(function () { msg("telegram-msg", t("field_required"), false); });

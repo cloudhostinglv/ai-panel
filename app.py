@@ -79,6 +79,29 @@ MAX_KEY_LEN = 512
 # Telegram bot tokens look like "<digits>:<35 url-safe chars>".
 TELEGRAM_TOKEN_RE = re.compile(r"^\d{6,}:[A-Za-z0-9_-]{20,}$")
 
+
+def _parse_allowed_users(raw: str) -> tuple[bool, str]:
+    """Parse the Telegram allowed-users field.
+
+    Accepts a comma-separated list of numeric Telegram user ids (the value the
+    client copies from @userinfobot). Returns (ok, normalized) where normalized
+    is the de-duplicated, comma-joined list with no spaces (the exact format
+    Hermes' TELEGRAM_ALLOWED_USERS expects). An empty input is valid (no
+    allowlist change requested) and normalizes to "".
+    """
+    if not raw.strip():
+        return True, ""
+    seen: list[str] = []
+    for part in raw.split(","):
+        uid = part.strip()
+        if not uid:
+            continue
+        if not uid.isdigit():
+            return False, ""
+        if uid not in seen:
+            seen.append(uid)
+    return (bool(seen), ",".join(seen))
+
 app = FastAPI(title="CloudHosting AI Panel")
 app.mount("/static", StaticFiles(directory=str(BASE_DIR / "static")), name="static")
 templates = Jinja2Templates(directory=str(BASE_DIR / "templates"))
@@ -306,15 +329,21 @@ def write_agent_config(provider: dict, api_key: str, model: str) -> None:
         raise RuntimeError(f"write_agent_config called for non-agent {PRODUCT!r}")
 
 
-def write_telegram(token: str, owner_id: str | None) -> None:
-    """Write the Telegram bot token (+ allowed user) into the agent .env."""
+def write_telegram(token: str, allowed_users: str | None) -> None:
+    """Write the Telegram bot token (+ allowed users) into the agent .env.
+
+    ``allowed_users`` is a normalized comma-separated list of numeric ids (see
+    ``_parse_allowed_users``). Hermes reads TELEGRAM_ALLOWED_USERS (CSV);
+    OpenClaw reads TELEGRAM_OWNER_ID — we write the same CSV there too (OpenClaw
+    accepts a comma list and the lead id remains the primary owner).
+    """
     env_path = DATA_DIR / ".env"
     updates = {"TELEGRAM_BOT_TOKEN": token}
-    if owner_id:
+    if allowed_users:
         if PRODUCT == "hermes":
-            updates["TELEGRAM_ALLOWED_USERS"] = owner_id
+            updates["TELEGRAM_ALLOWED_USERS"] = allowed_users
         elif PRODUCT == "openclaw":
-            updates["TELEGRAM_OWNER_ID"] = owner_id
+            updates["TELEGRAM_OWNER_ID"] = allowed_users
     _merge_env(env_path, updates)
 
 
@@ -479,7 +508,7 @@ async def api_provider(
 async def api_telegram(
     request: Request,
     token: str = Form(...),
-    owner_id: str = Form(""),
+    allowed_users: str = Form(""),
 ):
     if not is_authed(request):
         return JSONResponse({"ok": False, "error": "unauthorized"}, status_code=401)
@@ -487,14 +516,15 @@ async def api_telegram(
         return JSONResponse({"ok": False, "error": "not_an_agent"}, status_code=400)
 
     token = token.strip()
-    owner_id = owner_id.strip()
     if not TELEGRAM_TOKEN_RE.match(token):
         return JSONResponse({"ok": False, "error": "bad_token"}, status_code=400)
-    if owner_id and not owner_id.isdigit():
-        return JSONResponse({"ok": False, "error": "bad_owner_id"}, status_code=400)
+
+    ok_users, allowed_norm = _parse_allowed_users(allowed_users)
+    if not ok_users:
+        return JSONResponse({"ok": False, "error": "bad_allowed_users"}, status_code=400)
 
     try:
-        write_telegram(token, owner_id or None)
+        write_telegram(token, allowed_norm or None)
         signal_apply()
     except OSError as exc:
         return JSONResponse(
