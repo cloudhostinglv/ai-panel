@@ -387,7 +387,11 @@ module.exports = {
       name = provider; url = MCPS[provider].url;
     }
     const st = loadState();
-    st.mcps = (st.mcps || []).concat([{ name, url, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), enabled: true }]);
+    // Dedupe by name: re-adding/re-connecting the same MCP REPLACES the prior
+    // entry (otherwise a stale keyless entry + the new one would emit a duplicate
+    // `<name>:` key under mcp_servers in config.yaml).
+    st.mcps = (st.mcps || []).filter((x) => x.name !== name);
+    st.mcps.push({ name, url, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), enabled: true });
     saveState(st);
     const apply = applyAll(st, 'add-mcp');
     return {
