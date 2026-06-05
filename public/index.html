@@ -350,6 +350,18 @@
     }
     button.remove svg { display: block; }
 
+    /* Approve button in the Access-requests (pairing) queue. */
+    .configured .item button.approve {
+      margin: 0; padding: 7px 16px; flex-shrink: 0;
+      background: #16a34a; color: #fff;
+      border: 0; border-radius: 999px;
+      font-size: 13px; font-weight: 600; font-family: inherit;
+      cursor: pointer; transition: background .15s, transform .05s;
+    }
+    .configured .item button.approve:hover:not(:disabled) { background: #15803d; }
+    .configured .item button.approve:active:not(:disabled) { transform: translateY(1px); }
+    .configured .item button.approve:disabled { opacity: .55; cursor: default; }
+
     .configured .item .actions {
       display: flex; align-items: center; gap: 10px; flex-shrink: 0;
     }
@@ -497,6 +509,16 @@
     <div class="card" id="status-card">
       <h2><span class="ico">📊</span> <span data-i18n="statusTitle">Status</span></h2>
       <div id="status"><div class="row"><span data-i18n="statusLoading">Loading…</span></div></div>
+    </div>
+
+    <!-- Access requests (native Hermes pairing). Shown only for products with
+         capabilities.pairing AND when at least one person is waiting. Someone who
+         messages the bot but isn't approved lands here; Approve lets them in. -->
+    <div class="card" id="pairing-card" hidden>
+      <h2><span class="ico">🔑</span> <span data-i18n="pairingTitle">Access requests</span></h2>
+      <p class="hint" style="margin-top:2px" data-i18n="pairingHint">People who messaged your bot and are waiting for access. Approve to let them in - they can then use the assistant on any model.</p>
+      <div class="configured" id="pairingList" style="margin-top:12px"></div>
+      <div class="msg" id="pairingMsg"></div>
     </div>
 
     <div class="card" id="ai-card">
@@ -681,6 +703,10 @@
         cfgActive: 'active', cfgOff: 'off',
         moveUp: 'Move up', moveDown: 'Move down', remove: 'Remove',
         keyHintTitle: 'Key fingerprint (start…end) - to tell keys apart; not the full key',
+        pairingTitle: 'Access requests',
+        pairingHint: 'People who messaged your bot and are waiting for access. Approve to let them in - they can then use the assistant on any model.',
+        pairingApprove: 'Approve', pairingApproving: 'Approving…', pairingApproved: 'Approved. They can use the bot now.',
+        pairingErr: 'Could not approve. Try again.',
         msgSaving: 'Saving…', msgAdding: 'Adding…', msgConnecting: 'Connecting…',
         msgAiSaved: 'AI saved and active.',
         msgFbAdded: 'Fallback AI added.',
@@ -1289,6 +1315,29 @@
       renderConfiguredList('mcpConfigured', T('cfgConnectedMcps'), mcps, '/api/mcp/remove');
     }
 
+    // Render the native "Access requests" queue (pending pairings). Each row is a
+    // person who messaged the bot but isn't approved yet; Approve runs the
+    // gateway's `hermes pairing approve <platform> <code>` (via the host applier).
+    // The card hides itself when the product has no pairing or nobody is waiting.
+    function renderPairing(pairing, cap) {
+      const card = $('pairing-card'); const list = $('pairingList');
+      if (!card || !list) return;
+      const pending = (cap && cap.pairing && pairing && Array.isArray(pairing.pending)) ? pairing.pending : [];
+      if (!pending.length) { card.hidden = true; list.innerHTML = ''; return; }
+      card.hidden = false;
+      list.innerHTML = pending.map((p) => {
+        const name = p.userName || ('User ' + (p.userId || '?'));
+        const bits = [p.platform, p.userId ? ('ID ' + p.userId) : '', p.code].filter(Boolean);
+        return `<div class="item">` +
+          `<div class="meta"><span class="label">${esc(name)}</span>` +
+            `<span class="detail">${esc(bits.join(' · '))}</span></div>` +
+          `<button class="approve" type="button" ` +
+            `data-approve-platform="${esc(p.platform)}" data-approve-code="${esc(p.code)}">` +
+            `${esc(T('pairingApprove'))}</button>` +
+        `</div>`;
+      }).join('');
+    }
+
     // Delegated handler for every trash button in a .configured list: POST the
     // matching remove endpoint with the row id, then refresh both the lists and
     // the Status card via loadStatus(). The button disables while in flight.
@@ -1299,6 +1348,29 @@
       btn.disabled = true;
       try { await post(url, { id }); } catch (_) {}
       await loadStatus();
+    });
+
+    // Delegated handler for the Approve buttons in the Access-requests queue.
+    // POST the {platform, code}; the adapter queues it for the host applier, which
+    // runs `hermes pairing approve ...` and restarts the gateway. We give it a
+    // moment, then reload status so the approved person drops off the queue.
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button.approve'); if (!btn) return;
+      const platform = btn.dataset.approvePlatform, code = btn.dataset.approveCode;
+      if (!platform || !code) return;
+      const msg = $('pairingMsg');
+      const prev = btn.textContent;
+      btn.disabled = true; btn.textContent = T('pairingApproving');
+      let r;
+      try { r = await post('/api/pairing/approve', { platform, code }); }
+      catch (_) { r = { error: 'network' }; }
+      if (r && (r.ok || r.queued)) {
+        if (msg) show(msg, true, T('pairingApproved'));
+        setTimeout(loadStatus, 1500);
+      } else {
+        btn.disabled = false; btn.textContent = prev;
+        if (msg) show(msg, false, (r && r.error) ? ('Error: ' + r.error) : T('pairingErr'));
+      }
     });
 
     async function loadStatus() {
@@ -1315,6 +1387,9 @@
         // Render the per-section "what's connected" lists (with remove buttons)
         // from the adapter's structured `configured` view.
         renderConfigured(s.configured, cap);
+
+        // Native pairing approval queue (people waiting for bot access).
+        renderPairing(s.pairing, cap);
 
         let model = '-', fallbacks = [];
         try {

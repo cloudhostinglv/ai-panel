@@ -35,6 +35,13 @@ const DATA_DIR = process.env.HERMES_DATA_DIR || process.env.DATA_DIR || '/opt/da
 const CONFIG_FILE = path.join(DATA_DIR, 'config.yaml');
 const ENV_FILE = path.join(DATA_DIR, '.env');
 const APPLY_REQUEST = path.join(DATA_DIR, '.apply-request');
+// Native Hermes pairing: the agent persists pending approval requests under
+// <data>/pairing/<platform>-pending.json; the panel reads them to list who is
+// waiting and writes <data>/.pairing-request for the host applier to turn into
+// `hermes pairing approve <platform> <code>` (the panel can't exec the CLI).
+const PAIRING_DIR = path.join(DATA_DIR, 'pairing');
+const PAIRING_REQUEST = path.join(DATA_DIR, '.pairing-request');
+const PAIRING_FILE_RE = /^([a-z_][a-z0-9_]{1,30})-pending\.json$/;
 
 const DEFAULT_MODEL = 'anthropic/claude-opus-4.8';
 const DEFAULT_CONTEXT_LENGTH = 200000;
@@ -263,6 +270,54 @@ function applyAll(state, reason) {
   return touchApplyRequest(reason);
 }
 
+// === native pairing (approval) =============================================
+// Read every <data>/pairing/<platform>-pending.json and flatten to a list the
+// UI can render. The admin-facing "Code" (what `hermes pairing approve` and
+// `hermes pairing list` use) is the first 8 hex chars of each entry's `hash`.
+function listPairing() {
+  let files;
+  try { files = fs.readdirSync(PAIRING_DIR); } catch (_) { return []; }
+  const out = [];
+  for (const f of files) {
+    const m = PAIRING_FILE_RE.exec(f);
+    if (!m) continue;                       // skip _rate_limits.json etc.
+    const platform = m[1];
+    let data;
+    try { data = JSON.parse(fs.readFileSync(path.join(PAIRING_DIR, f), 'utf8')); } catch (_) { continue; }
+    if (!data || typeof data !== 'object') continue;
+    for (const entry of Object.values(data)) {
+      if (!entry || typeof entry !== 'object' || !entry.hash) continue;
+      out.push({
+        platform,
+        code: String(entry.hash).slice(0, 8),
+        userId: entry.user_id != null ? String(entry.user_id) : '',
+        userName: entry.user_name || '',
+        createdAt: entry.created_at || null,
+      });
+    }
+  }
+  out.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  return out;
+}
+
+const PAIRING_PLATFORM_RE = /^[a-z_]{2,20}$/;
+const PAIRING_CODE_RE = /^[a-f0-9]{6,64}$/;
+
+// Hand the host applier a pairing action via a tiny KEY=VALUE file (trivial +
+// injection-safe to parse in bash), then touch .apply-request so the existing
+// path unit fires. The applier validates again before exec'ing the CLI.
+function requestPairing(action, platform, code) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const body =
+    `action=${action}\n` +
+    `platform=${platform}\n` +
+    `code=${code}\n` +
+    `ts=${new Date().toISOString()}\n`;
+  fs.writeFileSync(PAIRING_REQUEST, body, { mode: 0o600 });
+  touchApplyRequest(`pairing-${action}`);
+  return { ok: true, queued: true };
+}
+
 module.exports = {
   id: 'hermes',
   label: 'Hermes',
@@ -274,6 +329,7 @@ module.exports = {
     fallback: true,   // exposed; see addFallback TODO (no confirmed Hermes mapping yet)
     messaging: true,
     mcp: true,        // wired: addMcp writes mcp_servers + MCP_<NAME>_KEY env
+    pairing: true,    // native Hermes approval: list pending + approve via applier
     openProduct: false,
     preconnect: true,
   },
@@ -325,7 +381,28 @@ module.exports = {
       channels: { ok: true, code: 0, stdout: JSON.stringify(channelsJson), stderr: '' },
       mcps:     { ok: true, code: 0, stdout: JSON.stringify(mcpsJson), stderr: '' },
       configured,
+      // Native Hermes approval queue: users who messaged the bot but aren't
+      // approved yet. The UI renders these as "Access requests" with Approve.
+      pairing: { pending: listPairing() },
     };
+  },
+
+  // List pending pairing requests (also surfaced inside status().pairing).
+  listPairing() { return listPairing(); },
+
+  // Approve a pending pairing code (delegates to the host applier, which runs
+  // `hermes pairing approve <platform> <code>` inside the gateway container).
+  async approvePairing({ platform, code } = {}) {
+    if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
+    if (!PAIRING_CODE_RE.test(code || '')) return { error: 'invalid code' };
+    return requestPairing('approve', platform, code);
+  },
+
+  // Revoke an approved user (same applier path, `hermes pairing revoke`).
+  async revokePairing({ platform, code } = {}) {
+    if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
+    if (!PAIRING_CODE_RE.test(code || '')) return { error: 'invalid code' };
+    return requestPairing('revoke', platform, code);
   },
 
   async setPrimary(provider, apiKey, custom, model) {

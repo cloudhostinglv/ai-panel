@@ -289,6 +289,37 @@ app.post('/api/mcp/remove', requireCap('mcp'), async (req, res) => {
   }
 });
 
+// === pairing (native approval queue) =======================================
+// Users who message the agent but aren't approved show up in status().pairing
+// .pending (read straight from the data dir). Approving one delegates to the
+// adapter, which hands the host applier a request to run the gateway's
+// `hermes pairing approve <platform> <code>`. Gated by the 'pairing' capability.
+app.post('/api/pairing/approve', requireCap('pairing'), async (req, res) => {
+  if (typeof adapter.approvePairing !== 'function') {
+    return res.status(404).json({ error: `pairing approve is not available for product '${PRODUCT}'` });
+  }
+  try {
+    const r = await adapter.approvePairing(req.body || {});
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+app.post('/api/pairing/revoke', requireCap('pairing'), async (req, res) => {
+  if (typeof adapter.revokePairing !== 'function') {
+    return res.status(404).json({ error: `pairing revoke is not available for product '${PRODUCT}'` });
+  }
+  try {
+    const r = await adapter.revokePairing(req.body || {});
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
 // === Feature 1: "Connect Avots" via OAuth 2.1 (DCR + PKCE) — keyless =======
 // avots issues a real `av_mcp_…` access_token that works for BOTH the
 // OpenAI-compatible API and MCP, so one browser login configures the whole
