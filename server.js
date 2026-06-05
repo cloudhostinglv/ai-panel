@@ -22,6 +22,7 @@ const express = require('express');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const avotsOAuth = require('./avots-oauth');
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
@@ -165,10 +166,11 @@ function requireCap(cap) {
 }
 
 // Set the active primary LLM (+ optional custom OpenAI-compatible endpoint).
+// `model` is optional: when present it overrides the provider's default model.
 app.post('/api/provider', requireCap('primary'), async (req, res) => {
-  const { provider, apiKey, custom } = req.body || {};
+  const { provider, apiKey, custom, model } = req.body || {};
   try {
-    const r = await adapter.setPrimary(provider, apiKey, custom);
+    const r = await adapter.setPrimary(provider, apiKey, custom, model);
     if (r && r.error) return res.status(400).json(r);
     res.json(r);
   } catch (e) {
@@ -208,6 +210,155 @@ app.post('/api/mcp', requireCap('mcp'), async (req, res) => {
     res.json(r);
   } catch (e) {
     res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
+// === Feature 1: "Connect Avots" via OAuth 2.1 (DCR + PKCE) — keyless =======
+// avots issues a real `av_mcp_…` access_token that works for BOTH the
+// OpenAI-compatible API and MCP, so one browser login configures the whole
+// agent without the user pasting a key. Agents only (capabilities.primary).
+// The redirect_uri is THIS panel's own public callback, reachable via Caddy:
+//   https://${PANEL_DOMAIN}:8443/oauth/avots/callback
+// Security: tokens/verifier are never logged; persisted files are 0600; the
+// `state` is validated on callback (CSRF). See avots-oauth.js for the machinery.
+const PANEL_DOMAIN = (process.env.PANEL_DOMAIN || '').trim();
+
+// GET /oauth/avots/start?model=<optional avots model id>
+//  1. ensure a registered DCR client (persisted client_id),
+//  2. mint PKCE verifier/challenge + state, stash the flow in memory (TTL),
+//  3. 302 the browser to the avots authorize URL.
+app.get('/oauth/avots/start', async (req, res) => {
+  if (!CAP.primary) {
+    return res.status(404).json({ error: `avots OAuth is not available for product '${PRODUCT}'` });
+  }
+  const redirect_uri = avotsOAuth.redirectUri(PANEL_DOMAIN);
+  if (!redirect_uri) {
+    return res.status(500).json({ error: 'PANEL_DOMAIN is not set; cannot build the OAuth redirect URL. Set PANEL_DOMAIN to this panel\'s public host.' });
+  }
+  const model = (typeof req.query.model === 'string' && req.query.model.trim()) ? req.query.model.trim() : undefined;
+  try {
+    const client = await avotsOAuth.ensureClient(redirect_uri, PANEL_DOMAIN);
+    const verifier = avotsOAuth.makeCodeVerifier();
+    const challenge = avotsOAuth.codeChallengeS256(verifier);
+    const state = avotsOAuth.makeState();
+    avotsOAuth.putFlow(state, { verifier, state, model, createdAt: Date.now() });
+    const url = avotsOAuth.buildAuthorizeUrl({
+      client_id: client.client_id,
+      redirect_uri,
+      state,
+      code_challenge: challenge,
+    });
+    return res.redirect(302, url);
+  } catch (e) {
+    // Never include token/verifier here (none exist yet at this stage anyway).
+    console.error('[avots-oauth] start failed:', (e && e.message) || e);
+    return res.redirect(302, '/?avots_error=start');
+  }
+});
+
+// GET /oauth/avots/callback?code&state  (also handles ?error=)
+//  1. validate + consume the flow by `state` (CSRF / replay protection),
+//  2. exchange the code for the av_mcp_ token (PKCE),
+//  3. persist {access_token, refresh_token} 0600,
+//  4. configure BOTH surfaces via the active adapter (primary + MCP),
+//  5. 302 back to the panel with ?connected=avots.
+app.get('/oauth/avots/callback', async (req, res) => {
+  if (!CAP.primary) {
+    return res.status(404).json({ error: `avots OAuth is not available for product '${PRODUCT}'` });
+  }
+  const { code, state, error: oauthError } = req.query;
+
+  // avots reported an error (e.g. user denied) — surface it gracefully.
+  if (oauthError) {
+    const safe = String(oauthError).replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'denied';
+    return res.redirect(302, `/?avots_error=${encodeURIComponent(safe)}`);
+  }
+
+  const flow = avotsOAuth.takeFlow(typeof state === 'string' ? state : '');
+  if (!flow) {
+    // Missing/expired/forged state → reject (do not exchange the code).
+    return res.redirect(302, '/?avots_error=state');
+  }
+  if (!code || typeof code !== 'string') {
+    return res.redirect(302, '/?avots_error=code');
+  }
+
+  const redirect_uri = avotsOAuth.redirectUri(PANEL_DOMAIN);
+  const client = avotsOAuth.loadClient();
+  if (!redirect_uri || !client || !client.client_id) {
+    return res.redirect(302, '/?avots_error=client');
+  }
+
+  let tokens;
+  try {
+    tokens = await avotsOAuth.exchangeCode({
+      code,
+      redirect_uri,
+      client_id: client.client_id,
+      code_verifier: flow.verifier,
+    });
+  } catch (e) {
+    // Log only the (token-free) error message, never the code/verifier.
+    console.error('[avots-oauth] token exchange failed:', (e && e.message) || e);
+    return res.redirect(302, '/?avots_error=token');
+  }
+
+  const accessToken = tokens.access_token;
+  try {
+    avotsOAuth.saveTokens(tokens);
+  } catch (e) {
+    console.error('[avots-oauth] could not persist tokens:', (e && e.message) || e);
+    // Non-fatal: we still configure the adapter below with the in-memory token.
+  }
+
+  // Configure BOTH surfaces with the av_mcp_ token via the active adapter:
+  //   primary → OpenAI provider (base_url maps to https://api.avots.ai/openai/v1)
+  //   MCP     → https://mcp.avots.ai/
+  try {
+    if (typeof adapter.setPrimary === 'function') {
+      await adapter.setPrimary('avots', accessToken, null, flow.model || undefined);
+    }
+  } catch (e) {
+    console.error('[avots-oauth] adapter.setPrimary failed:', (e && e.message) || e);
+  }
+  try {
+    if (CAP.mcp && typeof adapter.addMcp === 'function') {
+      await adapter.addMcp({ provider: 'avots', apiKey: accessToken });
+    }
+  } catch (e) {
+    console.error('[avots-oauth] adapter.addMcp failed:', (e && e.message) || e);
+  }
+
+  // Reflect the turnkey "connected and ready" indicator like the preconnect path.
+  avotsPreconnected = true;
+  return res.redirect(302, '/?connected=avots');
+});
+
+// === Feature 2: pricing in the model dropdown ==============================
+// GET /api/pricing — proxies the public avots pricing JSON with a ~1h in-memory
+// cache. On any fetch failure returns { data: [] } so the UI degrades to plain
+// model ids. Pricing applies to avots only (other providers bill direct).
+const PRICING_URL = 'https://api.avots.ai/openai/v1/pricing';
+const PRICING_TTL_MS = 60 * 60 * 1000; // ~1h
+let pricingCache = { at: 0, body: null };
+
+app.get('/api/pricing', async (_req, res) => {
+  const now = Date.now();
+  if (pricingCache.body && (now - pricingCache.at) < PRICING_TTL_MS) {
+    return res.json(pricingCache.body);
+  }
+  try {
+    const resp = await fetch(PRICING_URL, { headers: { accept: 'application/json' } });
+    if (!resp.ok) throw new Error(`pricing fetch ${resp.status}`);
+    const body = await resp.json();
+    if (!body || !Array.isArray(body.data)) throw new Error('pricing shape');
+    pricingCache = { at: now, body };
+    return res.json(body);
+  } catch (e) {
+    console.error('[pricing] fetch failed:', (e && e.message) || e);
+    // Serve a stale cache if we have one; otherwise degrade to empty.
+    if (pricingCache.body) return res.json(pricingCache.body);
+    return res.json({ data: [] });
   }
 });
 

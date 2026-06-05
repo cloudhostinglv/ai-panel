@@ -500,6 +500,7 @@
         <div class="configured" id="primaryConfigured" hidden></div>
         <label data-i18n="primaryChoose">Choose AI</label>
         <div class="provider-grid" id="providerGrid" role="radiogroup" aria-label="Choose primary AI"></div>
+
         <div id="customFields" class="custom-fields" hidden>
           <p class="custom-note" data-i18n="customNote">OpenAI-compatible endpoint only (Groq, Together, your own Ollama, LiteLLM, etc.).</p>
           <label for="customName" data-i18n="customName">Name</label>
@@ -509,12 +510,36 @@
           <label for="customModel" data-i18n="customModelId">Model ID</label>
           <input id="customModel" type="text" placeholder="e.g. llama-3.3-70b-versatile" data-i18n-ph="customModelIdPh" autocomplete="off" />
         </div>
+
+        <!-- Model picker — shared by the Avots Connect flow and the paste-key
+             flow. Pulled OUT of #primaryKeyArea so it stays visible for the
+             keyless "Connect Avots" path (which reads #primaryModel at click
+             time and threads it through as ?model=). The price hint below is
+             populated for the Avots card only (Feature 2). -->
+        <div id="primaryModelArea" hidden>
+          <label for="primaryModel" data-i18n="primaryModel">Model</label>
+          <select id="primaryModel"></select>
+          <input id="primaryModelCustom" type="text" placeholder="e.g. anthropic/claude-opus-4.8" data-i18n-ph="primaryModelCustomPh" autocomplete="off" hidden />
+          <div class="hint" id="avotsPriceHint"></div>
+        </div>
+
+        <!-- Avots OAuth ("Connect Avots", keyless). Shown only when the Avots
+             card is selected AND the product is an agent (capabilities.primary).
+             The model picker above (#primaryModel) is read at click time and
+             passed as ?model=. The button is a full-page navigation to
+             /oauth/avots/start (a redirect flow). The "or paste a key" link
+             reveals the classic #primaryKeyArea paste path for users who prefer
+             it. -->
+        <div id="avotsConnectArea" hidden>
+          <button id="connectAvots" class="btn-brand" type="button">Connect Avots</button>
+          <p class="hint" style="margin-top:10px">
+            Sign in to Avots in a new page, approve access, and you are connected.
+            No key to copy. <a href="#" id="avotsPasteToggle" role="button">or paste a key instead</a>.
+          </p>
+          <div class="msg" id="avotsMsg"></div>
+        </div>
+
         <div id="primaryKeyArea" hidden>
-          <div id="primaryModelArea" hidden>
-            <label for="primaryModel" data-i18n="primaryModel">Model</label>
-            <select id="primaryModel"></select>
-            <input id="primaryModelCustom" type="text" placeholder="e.g. anthropic/claude-opus-4.8" data-i18n-ph="primaryModelCustomPh" autocomplete="off" hidden />
-          </div>
           <label for="apiKey" data-i18n="primaryApiKey">API key</label>
           <input id="apiKey" type="password" placeholder="Paste your API key" data-i18n-ph="primaryApiKeyPh" autocomplete="off" />
           <div class="hint" id="providerHint"></div>
@@ -931,10 +956,46 @@
       }).join('');
     }
 
+    // === Feature 2: avots pricing =========================================
+    // Fetched once from /api/pricing (server-cached ~1h). Shape:
+    //   { currency, usd_per_1000_zaps, data: [{ id, use, input_per_1m_tokens,
+    //     output_per_1m_tokens, per_message_est }] }
+    // Indexed by model id. Pricing applies to avots ONLY (other providers bill
+    // direct), so it is only used to annotate the Avots model picker. If the
+    // fetch fails the map stays empty and the UI shows plain model ids.
+    const ZAP = '⚡';
+    let PRICING = {};        // id -> price record
+    let PRICING_USD_PER_1000 = null;
+
+    function priceFor(id) { return (id && PRICING[id]) || null; }
+
+    // Short price suffix for an <option> label, e.g. " — ~27⚡/msg".
+    function priceSuffix(id) {
+      const p = priceFor(id);
+      if (!p || p.per_message_est == null) return '';
+      return ` — ~${p.per_message_est}${ZAP}/msg`;
+    }
+
+    async function loadPricing() {
+      try {
+        const r = await fetch('/api/pricing').then(x => x.json());
+        const data = Array.isArray(r && r.data) ? r.data : [];
+        const map = {};
+        data.forEach(rec => { if (rec && rec.id) map[rec.id] = rec; });
+        PRICING = map;
+        if (typeof r.usd_per_1000_zaps === 'number') PRICING_USD_PER_1000 = r.usd_per_1000_zaps;
+      } catch (_) {
+        PRICING = {};  // degrade: plain model ids
+      }
+      // Re-annotate if the Avots picker is currently showing.
+      if (selectedPrimary === 'avots') { renderPrimaryModelOptions('avots'); syncAvotsPriceHint(); }
+    }
+
     // Populate the Primary-AI model <select> for a provider. The first model in
     // the curated list is the default selection. A trailing "Custom model…"
     // option reveals a free-form text input. For "custom" providers the picker
     // is hidden (the Add-your-own modelId field IS the model picker there).
+    // For "avots", each option label is annotated with its per-message price.
     function renderPrimaryModelOptions(provider) {
       const area = $('primaryModelArea');
       const sel = $('primaryModel');
@@ -942,12 +1003,39 @@
       if (!area || !sel || !free) return;
       const list = PRIMARY_MODELS[provider];
       if (!list) { area.hidden = true; sel.innerHTML = ''; free.hidden = true; free.value = ''; return; }
+      const prev = sel.value && sel.value !== CUSTOM_MODEL_VALUE ? sel.value : null;
       area.hidden = false;
       free.hidden = true; free.value = '';
+      const annotate = provider === 'avots';
       sel.innerHTML =
-        list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('') +
+        list.map(m => `<option value="${esc(m)}">${esc(m + (annotate ? priceSuffix(m) : ''))}</option>`).join('') +
         `<option value="${CUSTOM_MODEL_VALUE}">${esc(T('primaryModelCustomOpt'))}</option>`;
-      sel.value = list[0];
+      // Preserve the prior selection across a re-render (e.g. after pricing loads).
+      sel.value = (prev && list.includes(prev)) ? prev : list[0];
+    }
+
+    // Small hint under the model picker for the SELECTED avots model: its use,
+    // ~N⚡ per message (+ USD estimate), and input/output per 1M tokens. Hidden
+    // for non-avots providers and when no pricing is available for the model.
+    function syncAvotsPriceHint() {
+      const el = $('avotsPriceHint'); if (!el) return;
+      if (selectedPrimary !== 'avots') { el.innerHTML = ''; return; }
+      const id = selectedPrimaryModel();
+      const p = priceFor(id);
+      if (!p) { el.innerHTML = ''; return; }
+      const bits = [];
+      if (p.use) bits.push(esc(p.use));
+      if (p.per_message_est != null) {
+        const usd = (PRICING_USD_PER_1000 != null)
+          ? ` (~$${((p.per_message_est * PRICING_USD_PER_1000) / 1000).toFixed(3)})`
+          : ` (~$${(p.per_message_est / 1000).toFixed(3)})`;
+        bits.push(`~${p.per_message_est}${ZAP} per message${usd}`);
+      }
+      const io = [];
+      if (p.input_per_1m_tokens != null)  io.push(`in ${p.input_per_1m_tokens}${ZAP}/1M`);
+      if (p.output_per_1m_tokens != null) io.push(`out ${p.output_per_1m_tokens}${ZAP}/1M`);
+      if (io.length) bits.push(io.join(' · '));
+      el.innerHTML = bits.join(' &middot; ');
     }
 
     // The chosen primary model id (null = use the provider's default). Returns
@@ -965,10 +1053,22 @@
       const isCustom = $('primaryModel').value === CUSTOM_MODEL_VALUE;
       free.hidden = !isCustom;
       if (isCustom) free.focus();
+      syncAvotsPriceHint();  // selected-model price hint follows the dropdown
     });
+    // A custom avots model id has no catalog price; keep the hint in sync.
+    $('primaryModelCustom').addEventListener('input', syncAvotsPriceHint);
 
-    // Select a primary card: highlight it, reveal the key area (+ model picker /
-    // custom fields), and refresh the contextual hint. Stores the provider id.
+    // True when the keyless "Connect Avots" OAuth flow should be offered: the
+    // Avots card is selected AND the active product is an agent (primary cap).
+    function avotsOAuthOffered(provider) {
+      return provider === 'avots' && CAPS && CAPS.primary;
+    }
+
+    // Select a primary card: highlight it, reveal the right action area (+ model
+    // picker / custom fields), and refresh the contextual hint. Stores the
+    // provider id. For Avots on an agent product the keyless "Connect Avots"
+    // button is primary and the paste-key area is hidden behind a disclosure;
+    // every other provider keeps the classic paste-key flow shown directly.
     function selectPrimaryCard(provider) {
       selectedPrimary = provider;
       const grid = $('providerGrid');
@@ -977,10 +1077,16 @@
         card.classList.toggle('selected', on);
         card.setAttribute('aria-checked', on ? 'true' : 'false');
       });
-      $('primaryKeyArea').hidden = false;
       $('customFields').hidden = provider !== 'custom';
       renderPrimaryModelOptions(provider);  // hidden for custom; populated otherwise
+
+      const oauth = avotsOAuthOffered(provider);
+      $('avotsConnectArea').hidden = !oauth;
+      // Avots+agent: hide the paste-key area initially (revealed by the
+      // "or paste a key" disclosure). Everyone else: show it directly.
+      $('primaryKeyArea').hidden = oauth;
       syncProviderHint();
+      syncAvotsPriceHint();  // refresh the price hint for the (possibly new) model
     }
 
     // Contextual hint under the API-key field for the selected primary card.
@@ -1195,6 +1301,27 @@
       };
     }
 
+    // === Feature 1: "Connect Avots" (keyless OAuth) frontend ==============
+    // The button is a full-page navigation to /oauth/avots/start (it's a redirect
+    // flow that must leave the SPA). The currently-selected avots model is read
+    // AT CLICK TIME from the model picker and threaded through as ?model=.
+    $('connectAvots').onclick = () => {
+      const model = selectedPrimaryModel();   // null when the picker is on the default
+      let url = '/oauth/avots/start';
+      if (model) url += '?model=' + encodeURIComponent(model);
+      show($('avotsMsg'), true, 'Redirecting to Avots…');
+      window.location.href = url;   // full-page navigation (302 → avots login)
+    };
+
+    // "or paste a key instead" disclosure: reveal the classic paste-key area
+    // (hidden by default for the Avots card) so users who already hold an
+    // av_mcp_ key can use the existing flow.
+    $('avotsPasteToggle').addEventListener('click', (e) => {
+      e.preventDefault();
+      $('primaryKeyArea').hidden = false;
+      $('apiKey').focus();
+    });
+
     $('saveProvider').onclick = async () => {
       const b=$('saveProvider'); busy(b,true); show($('providerMsg'),true,'Saving…');
       const apiKey = $('apiKey').value.trim();
@@ -1306,11 +1433,42 @@
       window.location = '/login';
     });
 
+    // OAuth return handling: /oauth/avots/callback redirects back here with
+    // ?connected=avots on success or ?avots_error=<reason> on failure. Show an
+    // inline banner, refresh status (so the new primary/MCP shows), select the
+    // Avots card so the message lands in context, and strip the query params.
+    function handleAvotsReturn() {
+      const params = new URLSearchParams(window.location.search);
+      const connected = params.get('connected');
+      const err = params.get('avots_error');
+      if (!connected && !err) return;
+
+      // Make sure the Avots action area is visible so #avotsMsg is on screen.
+      if (CAPS && CAPS.primary) selectPrimaryCard('avots');
+
+      if (connected === 'avots') {
+        show($('avotsMsg'), true, 'Connected to Avots. Your AI is now active.');
+        loadStatus();
+      } else if (err) {
+        const reasons = {
+          start: 'Could not start the Avots sign-in (is PANEL_DOMAIN configured?).',
+          state: 'Sign-in expired or could not be verified. Please try again.',
+          code:  'Avots did not return an authorization code. Please try again.',
+          client:'Avots client registration is missing. Please try again.',
+          token: 'Could not complete the Avots sign-in (token exchange failed).',
+        };
+        show($('avotsMsg'), false, 'Avots: ' + (reasons[err] || ('sign-in failed (' + esc(err) + ').')));
+      }
+      // Clean the URL so a refresh doesn't re-trigger the banner.
+      try { window.history.replaceState({}, '', window.location.pathname); } catch (_) {}
+    }
+
     // === boot ===
     applyI18n();                       // English-only render of all data-i18n* hooks
     renderPrimaryCards();              // build the primary-AI card chooser
     renderDropdowns(LOCAL_PROVIDERS);  // fill the fallback dropdown (instant, offline-safe)
-    loadStatus();                      // may overwrite fallback list + status from the server
+    loadPricing();                     // fetch avots pricing once; annotates the Avots model picker
+    loadStatus().then(handleAvotsReturn);  // status first (sets CAPS) then process any OAuth return
   </script>
 </body>
 </html>
