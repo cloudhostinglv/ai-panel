@@ -296,8 +296,16 @@ function listPairing() {
       });
     }
   }
-  out.sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
-  return out;
+  // One person can have several pending requests (each unapproved message mints a
+  // fresh code), so collapse to ONE row per user (platform+id), keeping the most
+  // recent. Without a user id, fall back to deduping by code.
+  const byUser = new Map();
+  for (const item of out) {
+    const key = item.userId ? `${item.platform}:${item.userId}` : `${item.platform}:#${item.code}`;
+    const prev = byUser.get(key);
+    if (!prev || (item.createdAt || 0) > (prev.createdAt || 0)) byUser.set(key, item);
+  }
+  return [...byUser.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 }
 
 const PAIRING_PLATFORM_RE = /^[a-z_]{2,20}$/;
