@@ -74,8 +74,10 @@ function validateCustom(custom) {
   return null;
 }
 
-// Resolve { provider, apiKey, custom } -> { baseURL, model, label }.
-function resolveProvider(provider, custom) {
+// Resolve { provider, apiKey, custom, model } -> { baseURL, model, label }.
+// `modelOverride` (optional) replaces the provider's default model when set;
+// for custom providers the model always comes from custom.modelId.
+function resolveProvider(provider, custom, modelOverride) {
   if (provider === 'custom') {
     const err = validateCustom(custom);
     if (err) return { error: err };
@@ -87,7 +89,10 @@ function resolveProvider(provider, custom) {
   }
   const p = PROVIDERS[provider];
   if (!p) return { error: 'unknown provider' };
-  return { baseURL: p.baseURL, model: p.defaultModel || DEFAULT_MODEL, label: p.label };
+  const model = (typeof modelOverride === 'string' && modelOverride.trim())
+    ? modelOverride.trim()
+    : (p.defaultModel || DEFAULT_MODEL);
+  return { baseURL: p.baseURL, model, label: p.label };
 }
 
 // --- data-dir read/merge helpers --------------------------------------------
@@ -235,17 +240,23 @@ module.exports = {
       resolvedDefault: st.primary ? st.primary.model : null,
       fallbacks: (st.fallbacks || []).map((f) => f.model),
     };
-    const channelsJson = (st.channels || []).map((c) => ({ type: c.type, label: c.label }));
+    const channelsJson = (st.channels || [])
+      .filter((c) => c.enabled !== false)
+      .map((c) => ({ type: c.type, label: c.label }));
+    const mcpsJson = (st.mcps || [])
+      .filter((x) => x.enabled !== false)
+      .map((x) => ({ name: x.name, url: x.url }));
     return {
       models:   { ok: true, code: 0, stdout: JSON.stringify(modelsJson), stderr: '' },
       channels: { ok: true, code: 0, stdout: JSON.stringify(channelsJson), stderr: '' },
+      mcps:     { ok: true, code: 0, stdout: JSON.stringify(mcpsJson), stderr: '' },
     };
   },
 
-  async setPrimary(provider, apiKey, custom) {
+  async setPrimary(provider, apiKey, custom, model) {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
       return { error: 'missing api key' };
-    const r = resolveProvider(provider, custom);
+    const r = resolveProvider(provider, custom, model);
     if (r.error) return { error: r.error };
 
     const st = loadState();

@@ -141,7 +141,9 @@ module.exports = {
     return { models, channels };
   },
 
-  async setPrimary(provider, apiKey, custom) {
+  // `model` (optional) overrides the provider's default model (`models set <model>`).
+  // For custom providers the model is always `<name>/<modelId>` from the custom config.
+  async setPrimary(provider, apiKey, custom, model) {
     if (!PROVIDERS[provider]) return { error: 'unknown provider' };
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
       return { error: 'missing api key' };
@@ -158,7 +160,10 @@ module.exports = {
 
     const auth = await run(OC, ['models', 'auth', 'paste-api-key', '--provider', provider], apiKey.trim() + '\n');
     if (!auth.ok) return { step: 'auth', auth };
-    const set = await run(OC, ['models', 'set', PROVIDERS[provider].defaultModel]);
+    const chosenModel = (typeof model === 'string' && model.trim())
+      ? model.trim()
+      : PROVIDERS[provider].defaultModel;
+    const set = await run(OC, ['models', 'set', chosenModel]);
     const restart = await restartGateway();
     return { auth, set, restart };
   },

@@ -286,22 +286,26 @@
       border-radius: 12px;
     }
 
-    .test-banner {
-      background: var(--brand-soft); border: 1px solid var(--brand-line);
-      color: #9a3412;
-      padding: 10px 14px; border-radius: 10px;
-      font-size: 13px; margin: 0 0 24px;
-      display: flex; align-items: center; justify-content: space-between; gap: 12px;
-      flex-wrap: wrap;
+    /* === Fixed top bar (header) === */
+    .topbar {
+      position: sticky; top: 0; z-index: 50;
+      width: 100%;
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 16px;
+      padding: 12px 24px;
+      background: rgba(255, 255, 255, 0.82);
+      -webkit-backdrop-filter: saturate(180%) blur(12px);
+      backdrop-filter: saturate(180%) blur(12px);
+      border-bottom: 1px solid var(--line);
     }
-    .test-banner b { font-weight: 600; }
-    .test-banner button.clear {
-      margin: 0; width: auto; padding: 6px 12px;
-      background: transparent; color: #9a3412;
-      border: 1px solid var(--brand-line); font-size: 12px; font-weight: 600;
+    .topbar .brand {
+      display: inline-flex; align-items: center; gap: 9px;
+      font-size: 15px; font-weight: 700; letter-spacing: -0.01em; color: var(--txt);
     }
-    .test-banner button.clear:hover:not(:disabled) {
-      background: var(--brand); color: #fff; border-color: var(--brand);
+    .topbar .brand .logo {
+      width: 26px; height: 26px; border-radius: 7px; flex-shrink: 0;
+      display: inline-grid; place-items: center;
+      background: var(--brand); color: #fff; font-size: 15px;
     }
 
     .configured {
@@ -356,11 +360,6 @@
     button.move:disabled { opacity: .35; cursor: default; }
     button.move svg { display: block; }
 
-    .settings-row {
-      display: flex; justify-content: space-between; align-items: flex-end;
-      gap: 24px; flex-wrap: wrap;
-    }
-    .settings-item .sub-h { margin-bottom: 8px; }
     button.logout {
       width: auto; margin: 0; padding: 9px 18px;
       background: var(--card); color: var(--txt);
@@ -447,11 +446,11 @@
   </style>
 </head>
 <body>
+  <header class="topbar">
+    <span class="brand"><span class="logo" aria-hidden="true">✦</span> <span data-i18n="brandLabel">AI Control Panel</span></span>
+    <button id="logoutBtn" class="logout" type="button" data-i18n="settingsSignOut">Sign out</button>
+  </header>
   <div class="wrap">
-    <div class="test-banner" id="testBanner" hidden>
-      <span data-i18n-html="testBannerHtml"><b>Test mode</b> · changes are saved locally in your browser only and won't affect the real server.</span>
-      <button class="clear" id="clearTest" data-i18n="testBannerClear">Clear test data</button>
-    </div>
     <div class="hero">
       <div class="tag" data-i18n-html="tag"><b>Your personal AI</b> · on your own server</div>
       <div class="editable">
@@ -511,6 +510,11 @@
           <input id="customModel" type="text" placeholder="e.g. llama-3.3-70b-versatile" data-i18n-ph="customModelIdPh" autocomplete="off" />
         </div>
         <div id="primaryKeyArea" hidden>
+          <div id="primaryModelArea" hidden>
+            <label for="primaryModel" data-i18n="primaryModel">Model</label>
+            <select id="primaryModel"></select>
+            <input id="primaryModelCustom" type="text" placeholder="e.g. anthropic/claude-opus-4.8" data-i18n-ph="primaryModelCustomPh" autocomplete="off" hidden />
+          </div>
           <label for="apiKey" data-i18n="primaryApiKey">API key</label>
           <input id="apiKey" type="password" placeholder="Paste your API key" data-i18n-ph="primaryApiKeyPh" autocomplete="off" />
           <div class="hint" id="providerHint"></div>
@@ -578,16 +582,6 @@
       <div class="msg" id="mcpMsg"></div>
     </div>
 
-    <div class="card">
-      <h2><span class="ico">⚙️</span> Settings</h2>
-      <div class="settings-row">
-        <div class="settings-item">
-          <p class="sub-h">Account</p>
-          <p class="hint" style="margin-top:2px">End the current session.</p>
-          <button id="logoutBtn" class="logout" type="button">Sign out</button>
-        </div>
-      </div>
-    </div>
   </div>
 
   <script>
@@ -598,18 +592,20 @@
     const I18N = {
       en: {
         title: 'AI Assistant - Control Panel',
-        testBannerHtml: '<b>Test mode</b> · changes are saved locally in your browser only and won\'t affect the real server.',
-        testBannerClear: 'Clear test data',
+        brandLabel: 'AI Control Panel',
         tag: '<b>Your personal AI</b> · on your own server',
         heroSub: 'Connect your AI and messaging app. Keys stay on your server - no one else can access them.',
-        statusTitle: 'Status', statusLoading: 'Loading…', statusMode: 'Mode', statusModeTest: 'test (local)',
+        statusTitle: 'Status', statusLoading: 'Loading…',
         statusGateway: 'Gateway', statusRunning: 'running',
         statusPrimary: 'Primary AI', statusFallback: 'Fallback AI', statusMessaging: 'Messaging', statusMcp: 'MCP add-ons',
         statusNotSet: 'not set', statusNotAdded: 'none added', statusNoneActive: 'none active', statusSetUp: 'Set up →',
-        statusErrLoad: 'Could not load status (local preview)',
+        statusNotConnected: 'not connected',
+        statusErrLoad: 'Could not load status. Check that the panel backend is running.',
         aiCardTitle: 'AI model',
         primaryTitle: 'Primary AI', primaryHint: 'Only one primary AI is active at a time.',
-        primaryChoose: 'Choose AI', primaryApiKey: 'API key', primaryApiKeyPh: 'Paste your API key', primarySave: 'Add primary AI',
+        primaryChoose: 'Choose AI', primaryModel: 'Model', primaryModelCustomPh: 'e.g. anthropic/claude-opus-4.8',
+        primaryModelCustomOpt: 'Custom model…',
+        primaryApiKey: 'API key', primaryApiKeyPh: 'Paste your API key', primarySave: 'Add primary AI',
         customNote: 'OpenAI-compatible endpoint only (Groq, Together, your own Ollama, LiteLLM, etc.).',
         customName: 'Name', customNamePh: 'e.g. mygroq', customUrl: 'Base URL',
         customModelId: 'Model ID', customModelIdPh: 'e.g. llama-3.3-70b-versatile',
@@ -625,8 +621,7 @@
         mcpChoose: 'Choose MCP', mcpCustomNote: 'For any MCP server reachable over HTTPS with a Bearer token.',
         mcpCustomNamePh: 'e.g. my-github-mcp', mcpUrl: 'URL',
         mcpApiKey: 'API key / Bearer token', mcpApiKeyPh: 'Paste the MCP key', mcpSave: 'Add MCP',
-        settingsTitle: 'Settings',
-        settingsAccount: 'Account', settingsAccountHint: 'End the current session.', settingsSignOut: 'Sign out',
+        settingsSignOut: 'Sign out',
         cfgSavedAi: 'Saved AI providers', cfgActivePrimary: 'Active primary', cfgSetAsPrimary: 'Set as primary',
         cfgSavedFallbacks: 'Saved fallbacks', cfgSavedFallback: 'Saved fallback',
         cfgEnabledChain: 'Enabled (in chain)', cfgDisabledChain: 'Disabled (saved but skipped)',
@@ -637,10 +632,10 @@
         cfgActive: 'active', cfgOff: 'off',
         moveUp: 'Move up', moveDown: 'Move down', remove: 'Remove',
         msgSaving: 'Saving…', msgAdding: 'Adding…', msgConnecting: 'Connecting…',
-        msgAiSaved: 'AI saved and active.', msgTestSaved: 'Saved (test mode).', msgTestUpdated: 'Updated (test mode).',
-        msgFbAdded: 'Fallback AI added.', msgFbAddedTest: 'Fallback added (test mode).',
-        msgChConnected: 'Connected! Send your bot a message.', msgChAddedTest: 'Added (test mode).',
-        msgMcpAdded: 'MCP added.', msgMcpAddedTest: 'MCP added (test mode).',
+        msgAiSaved: 'AI saved and active.',
+        msgFbAdded: 'Fallback AI added.',
+        msgChConnected: 'Connected! Send your bot a message.',
+        msgMcpAdded: 'MCP added.',
         errPrefix: 'Error: ', errUnknown: 'unknown',
         errApiKey: 'API key required', errBotToken: 'bot token required',
         errCustomFields: 'fill in name, base URL and model ID', errCustomNameUrl: 'fill in name and URL',
@@ -650,7 +645,7 @@
         errTokenChannel: 'this exact token is already saved as ',
         errKeyMcp: 'this exact key is already saved for ',
         errUnknownMcp: 'unknown MCP',
-        pillFallback: 'fallback', pillSaved: 'saved', pillConfirmClear: 'Clear all locally-saved test data?',
+        pillFallback: 'fallback', pillSaved: 'saved',
         provGoogle: 'Gemini', provOpenai: 'ChatGPT', provAnthropic: 'Claude',
         provCustom: 'Add your own',
         provAvots: 'Avots AI',
@@ -729,91 +724,9 @@
     $('brandEdit').addEventListener('click', startBrandEdit);
     $('brandName').addEventListener('click', startBrandEdit);
 
-    // === Local test/mock mode ===
-    // When /api/status is unreachable (typical for local preview without a
-    // running backend), saves go to localStorage instead so the user can see
-    // what a populated panel would look like. A banner makes this obvious.
-    const MOCK_KEY = 'clawpanel.mockState.v1';
-    let MOCK_MODE = false;
-
-    function defaultMock() {
-      return { primaries: [], activePrimaryId: null, fallbacks: [], channels: [], mcps: [] };
-    }
-    // Migrate the old single-primary shape (state.primary) to the new list shape
-    // (state.primaries[] + activePrimaryId). Pre-existing localStorage state on
-    // returning users would otherwise become an empty primary list.
-    function migrateMock(m) {
-      if (m && m.primary && !Array.isArray(m.primaries)) {
-        m.primaries = [m.primary];
-        m.activePrimaryId = (typeof provId === 'function') ? provId(m.primary) : (m.primary.provider || null);
-      }
-      delete m.primary;
-      m.primaries = Array.isArray(m.primaries) ? m.primaries : [];
-      // Migrate the old single-avots state (m.avots = { preview }) to the new
-      // mcps[] list, so users that already added avots in test mode don't lose
-      // their entry. Old preview text just becomes the visible detail.
-      if (m.avots && !Array.isArray(m.mcps)) {
-        m.mcps = [{ name: 'Avots.ai', url: 'https://mcp.avots.ai/', keyTail: '', enabled: true }];
-      }
-      delete m.avots;
-      m.mcps = Array.isArray(m.mcps) ? m.mcps : [];
-      // If activePrimaryId is missing or no longer matches any record (e.g. the
-      // provId scheme changed across versions), point it at the first record.
-      const known = typeof provId === 'function'
-        ? m.primaries.some(p => provId(p) === m.activePrimaryId)
-        : false;
-      if (!known) {
-        m.activePrimaryId = m.primaries[0] && typeof provId === 'function'
-          ? provId(m.primaries[0]) : (m.primaries[0] && m.primaries[0].provider) || null;
-      }
-      return m;
-    }
-    function loadMock() {
-      try { return migrateMock(Object.assign(defaultMock(), JSON.parse(localStorage.getItem(MOCK_KEY) || '{}'))); }
-      catch(_) { return defaultMock(); }
-    }
-    function saveMock(s) { try { localStorage.setItem(MOCK_KEY, JSON.stringify(s)); } catch(_) {} }
-    function clearMock() { try { localStorage.removeItem(MOCK_KEY); } catch(_) {} }
-
     function esc(s) {
       return String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
-
-    // Primary section is special: it's a list with radio-style toggles
-    // (toggling one ON automatically turns the others OFF).
-    function renderPrimaries(state) {
-      const el = $('primaryConfigured');
-      if (!el) return;
-      const list = state.primaries || [];
-      if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
-      el.hidden = false;
-      el.innerHTML =
-        `<p class="configured-title">Saved AI providers (${list.length})</p>` +
-        list.map(p => {
-          const id = provId(p);
-          const isActive = id === state.activePrimaryId;
-          const detail = [p.model, p.keyTail ? '...' + p.keyTail : ''].filter(Boolean).join(' · ');
-          return `
-            <div class="item">
-              <div class="meta">
-                <span class="label">${esc(p.label)}</span>
-                ${detail ? `<span class="detail">${esc(detail)}</span>` : ''}
-              </div>
-              <div class="actions">
-                <label class="toggle" title="${isActive ? 'Active primary' : 'Set as primary'}">
-                  <input type="checkbox" data-kind="primary-active" data-id="${esc(id)}" ${isActive ? 'checked' : ''}>
-                  <span class="slider"></span>
-                </label>
-                <button class="remove" data-kind="primary" data-id="${esc(id)}" title="Remove" aria-label="Remove"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-              </div>
-            </div>`;
-        }).join('');
-    }
-
-    // Stable identity for messaging channels: type + last 3 chars of token,
-    // so the same channel type (e.g. Telegram) can host multiple bots with
-    // distinct tokens, each managed separately.
-    function channelId(c) { return c ? (c.type || '') + ':' + (c.tokenTail || '') : ''; }
 
     // Built-in MCP catalog. "avots" is the pre-configured first option;
     // "custom" lets the user point at any other Bearer-token MCP server.
@@ -872,130 +785,6 @@
         'Provide a <b>name</b> (any short id), the MCP server\'s <b>URL</b>, and a <b>Bearer token</b>. The panel will register it via <code>openclaw mcp add</code>.',
     };
 
-    function mcpId(x) { return x ? ((x.name || '').toLowerCase() + ':' + (x.keyTail || '')) : ''; }
-
-    // MCP section: list with independent enable/disable toggles. Multiple MCPs
-    // can be connected simultaneously - each gives the AI a different set of
-    // extra tools.
-    function renderMcps(state) {
-      const el = $('mcpConfigured');
-      if (!el) return;
-      const list = state.mcps || [];
-      if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
-      el.hidden = false;
-      const enabledCount = list.filter(x => x.enabled !== false).length;
-      const title = list.length > 1
-        ? `Connected MCPs (${enabledCount}/${list.length} active)`
-        : `Connected MCP`;
-      el.innerHTML =
-        `<p class="configured-title">${esc(title)}</p>` +
-        list.map(x => {
-          const id = mcpId(x);
-          const isOn = x.enabled !== false;
-          const detail = [x.url || '', x.keyTail ? '...' + x.keyTail : ''].filter(Boolean).join(' · ');
-          return `
-            <div class="item">
-              <div class="meta">
-                <span class="label">${esc(x.name)}</span>
-                ${detail ? `<span class="detail">${esc(detail)}</span>` : ''}
-              </div>
-              <div class="actions">
-                <label class="toggle" title="${isOn ? 'Enabled' : 'Disabled (saved but inactive)'}">
-                  <input type="checkbox" data-kind="mcp-enabled" data-id="${esc(id)}" ${isOn ? 'checked' : ''}>
-                  <span class="slider"></span>
-                </label>
-                <button class="remove" data-kind="mcp" data-id="${esc(id)}" title="Remove" aria-label="Remove"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-              </div>
-            </div>`;
-        }).join('');
-    }
-
-    // Channels section: list with independent enable/disable toggles (same
-    // semantics as fallback). Multiple bots per channel type allowed.
-    function renderChannels(state) {
-      const el = $('channelsConfigured');
-      if (!el) return;
-      const list = state.channels || [];
-      if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
-      el.hidden = false;
-      const enabledCount = list.filter(c => c.enabled !== false).length;
-      const title = list.length > 1
-        ? `Connected channels (${enabledCount}/${list.length} active)`
-        : `Connected channel`;
-      el.innerHTML =
-        `<p class="configured-title">${esc(title)}</p>` +
-        list.map(c => {
-          const id = channelId(c);
-          const isOn = c.enabled !== false;
-          const detail = c.tokenTail ? '...' + c.tokenTail : (c.detail || '');
-          return `
-            <div class="item">
-              <div class="meta">
-                <span class="label">${esc(c.label)}</span>
-                ${detail ? `<span class="detail">${esc(detail)}</span>` : ''}
-              </div>
-              <div class="actions">
-                <label class="toggle" title="${isOn ? 'Enabled (listening)' : 'Disabled (saved but not listening)'}">
-                  <input type="checkbox" data-kind="channel-enabled" data-id="${esc(id)}" ${isOn ? 'checked' : ''}>
-                  <span class="slider"></span>
-                </label>
-                <button class="remove" data-kind="channel" data-id="${esc(id)}" title="Remove" aria-label="Remove"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-              </div>
-            </div>`;
-        }).join('');
-    }
-
-    // Fallback section: list with independent enable/disable toggles for each
-    // entry. Unlike primary, fallbacks are NOT mutually exclusive - the gateway
-    // tries enabled ones in order. Disabled stay saved but skipped.
-    function renderFallbacks(state) {
-      const el = $('fallbacksConfigured');
-      if (!el) return;
-      const list = state.fallbacks || [];
-      if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
-      el.hidden = false;
-      const enabledCount = list.filter(f => f.enabled !== false).length;
-      const title = list.length > 1
-        ? `Saved fallbacks (${enabledCount}/${list.length} active)`
-        : `Saved fallback`;
-      const arrowUp   = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 15 12 9 18 15"/></svg>';
-      const arrowDown = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"/></svg>';
-      el.innerHTML =
-        `<p class="configured-title">${esc(title)}</p>` +
-        list.map((f, i) => {
-          const id = provId(f);
-          const isOn = f.enabled !== false;
-          const isFirst = i === 0;
-          const isLast  = i === list.length - 1;
-          const detail = [f.model, f.keyTail ? '...' + f.keyTail : ''].filter(Boolean).join(' · ');
-          return `
-            <div class="item">
-              <div class="meta">
-                <span class="label">${esc(f.label)}</span>
-                ${detail ? `<span class="detail">${esc(detail)}</span>` : ''}
-              </div>
-              <div class="actions">
-                <div class="reorder">
-                  <button class="move" data-kind="fallback-up" data-id="${esc(id)}" ${isFirst ? 'disabled' : ''} title="Move up" aria-label="Move up">${arrowUp}</button>
-                  <button class="move" data-kind="fallback-down" data-id="${esc(id)}" ${isLast ? 'disabled' : ''} title="Move down" aria-label="Move down">${arrowDown}</button>
-                </div>
-                <label class="toggle" title="${isOn ? 'Enabled (in chain)' : 'Disabled (saved but skipped)'}">
-                  <input type="checkbox" data-kind="fallback-enabled" data-id="${esc(id)}" ${isOn ? 'checked' : ''}>
-                  <span class="slider"></span>
-                </label>
-                <button class="remove" data-kind="fallback" data-id="${esc(id)}" title="Remove" aria-label="Remove"><svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg></button>
-              </div>
-            </div>`;
-        }).join('');
-    }
-
-    function renderConfigured(state) {
-      renderPrimaries(state);
-      renderFallbacks(state);
-      renderChannels(state);
-      renderMcps(state);
-    }
-
     // Smooth-scroll to a section/card and briefly flash a blue ring so the eye
     // lands on the right block after a Status "Set up →" CTA.
     function scrollToSection(id) {
@@ -1016,51 +805,6 @@
         scrollToSection(jump.dataset.scroll);
         return;
       }
-
-      // Fallback reorder buttons (separate path - they don't have .remove class).
-      const mv = e.target.closest('button.move');
-      if (mv) {
-        const m = loadMock();
-        const id = mv.dataset.id;
-        const list = m.fallbacks || [];
-        const idx = list.findIndex(f => provId(f) === id);
-        if (idx < 0) return;
-        if (mv.dataset.kind === 'fallback-up' && idx > 0) {
-          [list[idx - 1], list[idx]] = [list[idx], list[idx - 1]];
-        } else if (mv.dataset.kind === 'fallback-down' && idx < list.length - 1) {
-          [list[idx], list[idx + 1]] = [list[idx + 1], list[idx]];
-        } else {
-          return;
-        }
-        m.fallbacks = list;
-        saveMock(m); renderConfigured(m); updateStatusFromMock(m);
-        return;
-      }
-
-      const btn = e.target.closest('.remove'); if (!btn) return;
-      const m = loadMock();
-      const kind = btn.dataset.kind;
-      if (kind === 'primary') {
-        const id = btn.dataset.id;
-        m.primaries = (m.primaries || []).filter(p => provId(p) !== id);
-        // If we removed the active one, promote the first remaining (or none).
-        if (m.activePrimaryId === id) {
-          m.activePrimaryId = m.primaries[0] ? provId(m.primaries[0]) : null;
-        }
-      }
-      else if (kind === 'fallback') {
-        const id = btn.dataset.id;
-        m.fallbacks = (m.fallbacks || []).filter(f => provId(f) !== id);
-      }
-      else if (kind === 'channel') {
-        const id = btn.dataset.id;
-        m.channels = (m.channels || []).filter(c => channelId(c) !== id);
-      }
-      else if (kind === 'mcp') {
-        const id = btn.dataset.id;
-        m.mcps = (m.mcps || []).filter(x => mcpId(x) !== id);
-      }
-      saveMock(m); renderConfigured(m); updateStatusFromMock(m);
     });
 
     // Keyboard support for CTA pills: Tab focuses (tabindex="0"), Enter/Space
@@ -1071,88 +815,16 @@
       e.preventDefault(); t.click();
     });
 
-    // Toggles: primary uses radio semantics (exactly one active); fallback
-    // toggles are independent enable/disable per entry.
-    document.addEventListener('change', (e) => {
-      const cb = e.target.closest('input[data-kind]'); if (!cb) return;
-      const m = loadMock();
-      const id = cb.dataset.id;
-      if (cb.dataset.kind === 'primary-active') {
-        if (m.activePrimaryId === id) { cb.checked = true; return; }
-        m.activePrimaryId = id;
-      } else if (cb.dataset.kind === 'fallback-enabled') {
-        m.fallbacks = (m.fallbacks || []).map(f =>
-          provId(f) === id ? { ...f, enabled: cb.checked } : f
-        );
-      } else if (cb.dataset.kind === 'channel-enabled') {
-        m.channels = (m.channels || []).map(c =>
-          channelId(c) === id ? { ...c, enabled: cb.checked } : c
-        );
-      } else if (cb.dataset.kind === 'mcp-enabled') {
-        m.mcps = (m.mcps || []).map(x =>
-          mcpId(x) === id ? { ...x, enabled: cb.checked } : x
-        );
-      } else {
-        return;
-      }
-      saveMock(m); renderConfigured(m); updateStatusFromMock(m);
-    });
-
     // Jump-to-setup CTA: empty rows render as a clickable pill that smooth-
     // scrolls to the matching block when the user activates it.
     function ctaPill(target) {
       return `<span class="pill action" data-scroll="${target}" role="button" tabindex="0" title="Jump to setup">Set up →</span>`;
     }
-    function updateStatusFromMock(m) {
-      const primaries = m.primaries || [];
-      const active = primaries.find(p => provId(p) === m.activePrimaryId);
-      const extra = primaries.length > 1 ? ' (+' + (primaries.length - 1) + ' saved)' : '';
-      const pAi = active
-        ? `<span class="pill ok">${esc(active.label)}${extra}</span>`
-        : (primaries.length ? `<span class="pill">none active</span>` : ctaPill('primary-section'));
-      const fbList = m.fallbacks || [];
-      const fbActive = fbList.filter(f => f.enabled !== false).length;
-      const chList = m.channels || [];
-      const chActive = chList.filter(c => c.enabled !== false).length;
-      const fbPill = fbList.length
-        ? `<span class="pill ok">${fbActive}× active${fbList.length > fbActive ? ' (+' + (fbList.length - fbActive) + ' off)' : ''}</span>`
-        : ctaPill('fallback-section');
-      const chPill = chList.length
-        ? `<span class="pill ok">${chActive} active${chList.length > chActive ? ' (+' + (chList.length - chActive) + ' off)' : ''}</span>`
-        : ctaPill('messaging-card');
-      const mcpList = m.mcps || [];
-      const mcpActive = mcpList.filter(x => x.enabled !== false).length;
-      const mcpPill = mcpList.length
-        ? `<span class="pill ok">${mcpActive} active${mcpList.length > mcpActive ? ' (+' + (mcpList.length - mcpActive) + ' off)' : ''}</span>`
-        : ctaPill('mcp-card');
-      $('status').innerHTML =
-        `<div class="row"><span>Mode</span><span class="pill">test (local)</span></div>` +
-        `<div class="row"><span>Primary AI</span>${pAi}</div>` +
-        `<div class="row"><span>Fallback AI</span>${fbPill}</div>` +
-        `<div class="row"><span>Messaging</span>${chPill}</div>` +
-        `<div class="row"><span>MCP add-ons</span>${mcpPill}</div>`;
-    }
-
-    function enableMockMode() {
-      MOCK_MODE = true;
-      $('testBanner').hidden = false;
-      const m = loadMock();
-      renderConfigured(m);
-      updateStatusFromMock(m);
-    }
-
-    $('clearTest').onclick = () => {
-      if (!confirm('Clear all locally-saved test data?')) return;
-      clearMock();
-      const m = loadMock();
-      renderConfigured(m); updateStatusFromMock(m);
-    };
 
     // Local mirror of backend PROVIDERS - used to populate the picker instantly,
-    // so the page is interactive even when /api/status is unreachable (local
-    // preview, gateway down). Server response, if it arrives, overrides this.
-    // Curated to the same 5 the cards expose (Avots first). "openrouter" was
-    // folded into "Add your own" (custom).
+    // so the fallback dropdown is filled before /api/status returns. The server
+    // response, if it arrives, overrides this. Curated to the same 5 the cards
+    // expose (Avots first). "openrouter" was folded into "Add your own" (custom).
     const LOCAL_PROVIDERS = {
       avots:      { label: 'Avots AI',     defaultModel: 'anthropic/claude-opus-4.8' },
       openai:     { label: 'ChatGPT',      defaultModel: 'openai/gpt-5.5' },
@@ -1196,6 +868,43 @@
       },
     ];
 
+    // Curated model lists per provider for the Primary-AI model picker. The
+    // first entry in each list is the default selection. ids are sent to
+    // /api/provider as `model` (OpenRouter-style; the adapter passes them to
+    // `models set` / config.yaml model.default). "custom" providers use the
+    // Add-your-own modelId field instead of this picker.
+    const PRIMARY_MODELS = {
+      avots: [
+        'anthropic/claude-opus-4.8',
+        'anthropic/claude-sonnet-4.6',
+        'openai/gpt-5.5-pro',
+        'google/gemini-3.1-pro-preview',
+        'google/gemini-2.5-pro',
+        'anthropic/claude-haiku-4.5',
+        'deepseek/deepseek-r1',
+        'google/gemini-2.5-flash',
+        'openai/gpt-5-mini',
+        'x-ai/grok-4-fast',
+      ],
+      openai: [
+        'openai/gpt-5.5',
+        'openai/gpt-5.5-pro',
+        'openai/gpt-5-mini',
+        'openai/gpt-4o',
+      ],
+      anthropic: [
+        'anthropic/claude-opus-4.8',
+        'anthropic/claude-sonnet-4.6',
+        'anthropic/claude-haiku-4.5',
+      ],
+      google: [
+        'google/gemini-2.5-pro',
+        'google/gemini-3.1-pro-preview',
+        'google/gemini-2.5-flash',
+      ],
+    };
+    const CUSTOM_MODEL_VALUE = '__custom__';
+
     // The provider id of the currently-selected primary card (null until the
     // user picks one). Read by the save handler instead of an old <select>.
     let selectedPrimary = null;
@@ -1222,8 +931,44 @@
       }).join('');
     }
 
-    // Select a primary card: highlight it, reveal the key area (+ custom fields
-    // for `custom`), and refresh the contextual hint. Stores the provider id.
+    // Populate the Primary-AI model <select> for a provider. The first model in
+    // the curated list is the default selection. A trailing "Custom model…"
+    // option reveals a free-form text input. For "custom" providers the picker
+    // is hidden (the Add-your-own modelId field IS the model picker there).
+    function renderPrimaryModelOptions(provider) {
+      const area = $('primaryModelArea');
+      const sel = $('primaryModel');
+      const free = $('primaryModelCustom');
+      if (!area || !sel || !free) return;
+      const list = PRIMARY_MODELS[provider];
+      if (!list) { area.hidden = true; sel.innerHTML = ''; free.hidden = true; free.value = ''; return; }
+      area.hidden = false;
+      free.hidden = true; free.value = '';
+      sel.innerHTML =
+        list.map(m => `<option value="${esc(m)}">${esc(m)}</option>`).join('') +
+        `<option value="${CUSTOM_MODEL_VALUE}">${esc(T('primaryModelCustomOpt'))}</option>`;
+      sel.value = list[0];
+    }
+
+    // The chosen primary model id (null = use the provider's default). Returns
+    // the free-form value when "Custom model…" is selected.
+    function selectedPrimaryModel() {
+      const sel = $('primaryModel');
+      const free = $('primaryModelCustom');
+      if (!sel || $('primaryModelArea').hidden) return null;
+      if (sel.value === CUSTOM_MODEL_VALUE) return (free.value || '').trim() || null;
+      return sel.value || null;
+    }
+
+    $('primaryModel').addEventListener('change', () => {
+      const free = $('primaryModelCustom');
+      const isCustom = $('primaryModel').value === CUSTOM_MODEL_VALUE;
+      free.hidden = !isCustom;
+      if (isCustom) free.focus();
+    });
+
+    // Select a primary card: highlight it, reveal the key area (+ model picker /
+    // custom fields), and refresh the contextual hint. Stores the provider id.
     function selectPrimaryCard(provider) {
       selectedPrimary = provider;
       const grid = $('providerGrid');
@@ -1234,6 +979,7 @@
       });
       $('primaryKeyArea').hidden = false;
       $('customFields').hidden = provider !== 'custom';
+      renderPrimaryModelOptions(provider);  // hidden for custom; populated otherwise
       syncProviderHint();
     }
 
@@ -1345,6 +1091,8 @@
         // Builder mode renders its own card; skip the agent status table below.
         if (s.capabilities && s.capabilities.openProduct) return;
 
+        const cap = (s.capabilities) || {};
+
         let model = '-', fallbacks = [];
         try {
           const m = JSON.parse(s.models.stdout);
@@ -1360,15 +1108,43 @@
         const avotsRow = s.preconnected
           ? `<div class="row"><span>Avots AI</span><span class="pill ok">connected and ready</span></div>`
           : '';
+
+        // Messaging + MCP rows (agent products only - gated on capabilities).
+        // The adapter status reports connected channels / mcps as JSON arrays;
+        // empty -> "not connected" with a "Set up →" CTA to the relevant card.
+        let rows = '';
+        if (cap.messaging) {
+          let channels = [];
+          try { channels = JSON.parse((s.channels && s.channels.stdout) || '[]'); } catch(_) {}
+          channels = Array.isArray(channels) ? channels : [];
+          const chPill = channels.length
+            ? `<span class="pill ok">${channels.length} connected</span>`
+            : ctaPill('messaging-card');
+          rows += `<div class="row"><span>Messaging</span>${chPill}</div>`;
+        }
+        if (cap.mcp) {
+          let mcps = [];
+          try { mcps = JSON.parse((s.mcps && s.mcps.stdout) || '[]'); } catch(_) {}
+          mcps = Array.isArray(mcps) ? mcps : [];
+          const mcpPill = mcps.length
+            ? `<span class="pill ok">${mcps.length} connected</span>`
+            : ctaPill('mcp-card');
+          rows += `<div class="row"><span>MCP</span>${mcpPill}</div>`;
+        }
+
+        const primaryPill = model && model !== '-'
+          ? `<span class="pill">${esc(model)}</span>`
+          : ctaPill('primary-section');
         $('status').innerHTML =
           `<div class="row"><span>Gateway</span><span class="pill ok">running</span></div>` +
           avotsRow +
-          `<div class="row"><span>Primary AI</span><span class="pill">${model}</span></div>` +
-          `<div class="row"><span>Fallback AI</span>${fbPill}</div>`;
+          `<div class="row"><span>Primary AI</span>${primaryPill}</div>` +
+          (cap.fallback !== false ? `<div class="row"><span>Fallback AI</span>${fbPill}</div>` : '') +
+          rows;
       } catch(e) {
-        // API not reachable - switch to local test mode so the user can still
-        // interact with the panel and preview what a populated state looks like.
-        enableMockMode();
+        // Backend unreachable or returned an error - show a normal inline error.
+        $('status').innerHTML =
+          `<div class="row"><span class="msg err">${esc(T('statusErrLoad'))}</span></div>`;
       }
     }
 
@@ -1419,64 +1195,24 @@
       };
     }
 
-    // Build a {provider,label,model} record from a provider id + key. Shared
-    // between mock-mode save handlers (primary card grid + fallback <select>).
-    function buildProviderRecord(provider, customPrefix, apiKey) {
-      const meta = LOCAL_PROVIDERS[provider] || {};
-      const label = meta.label || provider;
-      // Keep the last 3 chars of the API key so the user can tell saved keys
-      // apart at a glance ("...A4f"). The rest of the key is never stored.
-      const keyTail = (apiKey || '').trim().slice(-3);
-      if (provider === 'custom') {
-        const c = collectCustom(customPrefix);
-        if (!c.name || !c.baseURL || !c.modelId) return { error: 'fill in name, base URL and model ID' };
-        return { provider, label: c.name + ' (custom)', model: c.name + '/' + c.modelId, keyTail };
-      }
-      return { provider, label, model: meta.defaultModel || '', keyTail };
-    }
-
-    // Stable identity for dedupe. The keyTail is part of the id so the same
-    // provider can be added multiple times with different API keys (each one
-    // becomes a separate entry). Re-pasting the same key updates in place.
-    // Custom providers also distinguish by user-given name.
-    function provId(r) {
-      if (!r) return '';
-      const base = r.provider === 'custom' ? 'custom:' + (r.label || '') : (r.provider || '');
-      return base + ':' + (r.keyTail || '');
-    }
-
     $('saveProvider').onclick = async () => {
       const b=$('saveProvider'); busy(b,true); show($('providerMsg'),true,'Saving…');
       const apiKey = $('apiKey').value.trim();
       const provider = selectedPrimary;
       if (!provider) { show($('providerMsg'), false, 'Error: choose an AI first'); busy(b,false); return; }
-
-      if (MOCK_MODE) {
-        if (!apiKey) { show($('providerMsg'), false, 'Error: API key required'); busy(b,false); return; }
-        const rec = buildProviderRecord(provider, 'custom', apiKey);
-        if (rec.error) { show($('providerMsg'), false, 'Error: ' + rec.error); busy(b,false); return; }
-        const m = loadMock();
-        const rid = provId(rec);
-        // Append to the saved-providers list, or update in place if this provider
-        // was already saved. Newly-added becomes the active primary; an already-
-        // saved one being re-saved is treated as "make this active too".
-        const idx = m.primaries.findIndex(p => provId(p) === rid);
-        if (idx >= 0) m.primaries[idx] = rec; else m.primaries.push(rec);
-        // Only auto-activate when there's no active primary yet (i.e. this is
-        // the first AI). Adding subsequent providers leaves the active one
-        // untouched - the user explicitly toggles to switch.
-        if (!m.activePrimaryId) m.activePrimaryId = rid;
-        // If this AI was also in the fallback list, drop the duplicate.
-        m.fallbacks = (m.fallbacks || []).filter(f => provId(f) !== rid);
-        saveMock(m);
-        show($('providerMsg'), true, idx >= 0 ? 'Updated (test mode).' : 'Saved (test mode).');
-        $('apiKey').value = ''; renderConfigured(m); updateStatusFromMock(m);
-        busy(b,false); return;
-      }
+      if (!apiKey) { show($('providerMsg'), false, 'Error: API key required'); busy(b,false); return; }
 
       const body = { provider, apiKey };
-      if (provider === 'custom') body.custom = collectCustom('custom');
-      const r = await post('/api/provider', body);
+      if (provider === 'custom') {
+        body.custom = collectCustom('custom');
+      } else {
+        // Optional model override from the picker (omitted -> provider default).
+        const model = selectedPrimaryModel();
+        if (model) body.model = model;
+      }
+      let r;
+      try { r = await post('/api/provider', body); }
+      catch(e) { show($('providerMsg'), false, 'Error: could not reach the server'); busy(b,false); return; }
       const ok = r.auth && r.auth.ok && (!r.set || r.set.ok);
       show($('providerMsg'), ok, ok ? 'AI saved and active.' : ('Error: ' + ((r.auth&&r.auth.stderr)||(r.patch&&r.patch.stderr)||r.error||'unknown')));
       busy(b,false); if (ok) { $('apiKey').value=''; loadStatus(); }
@@ -1485,31 +1221,13 @@
     $('saveFallback').onclick = async () => {
       const b=$('saveFallback'); busy(b,true); show($('fallbackMsg'),true,'Adding…');
       const apiKey = $('fallbackKey').value.trim();
-
-      if (MOCK_MODE) {
-        if (!apiKey) { show($('fallbackMsg'), false, 'Error: API key required'); busy(b,false); return; }
-        const rec = buildProviderRecord($('fallbackProvider').value, 'fbCustom', apiKey);
-        if (rec.error) { show($('fallbackMsg'), false, 'Error: ' + rec.error); busy(b,false); return; }
-        const m = loadMock();
-        if ((m.primaries || []).some(p => provId(p) === provId(rec))) {
-          show($('fallbackMsg'), false, 'Error: this exact key is already saved as primary');
-          busy(b,false); return;
-        }
-        if ((m.fallbacks || []).some(f => provId(f) === provId(rec))) {
-          show($('fallbackMsg'), false, 'Error: this exact key is already saved as fallback');
-          busy(b,false); return;
-        }
-        // Newly-added fallbacks default to enabled (in the gateway chain).
-        // The user can toggle off later without losing the saved key.
-        m.fallbacks = (m.fallbacks || []).concat([{ ...rec, enabled: true }]); saveMock(m);
-        show($('fallbackMsg'), true, 'Fallback added (test mode).');
-        $('fallbackKey').value = ''; renderConfigured(m); updateStatusFromMock(m);
-        busy(b,false); return;
-      }
+      if (!apiKey) { show($('fallbackMsg'), false, 'Error: API key required'); busy(b,false); return; }
 
       const body = { provider:$('fallbackProvider').value, apiKey };
       if (body.provider === 'custom') body.custom = collectCustom('fbCustom');
-      const r = await post('/api/fallback', body);
+      let r;
+      try { r = await post('/api/fallback', body); }
+      catch(e) { show($('fallbackMsg'), false, 'Error: could not reach the server'); busy(b,false); return; }
       const ok = r.auth && r.auth.ok && (!r.add || r.add.ok);
       show($('fallbackMsg'), ok, ok ? 'Fallback AI added.' : ('Error: ' + ((r.auth&&r.auth.stderr)||(r.add&&r.add.stderr)||(r.patch&&r.patch.stderr)||r.error||'unknown')));
       busy(b,false); if (ok) { $('fallbackKey').value=''; loadStatus(); }
@@ -1519,31 +1237,14 @@
       const b=$('saveChannel'); busy(b,true); show($('channelMsg'),true,'Connecting…');
       const token = $('token').value.trim();
       const channel = $('channel').value;
+      if (!token) { show($('channelMsg'), false, 'Error: bot token required'); busy(b,false); return; }
 
-      if (MOCK_MODE) {
-        if (!token) { show($('channelMsg'), false, 'Error: bot token required'); busy(b,false); return; }
-        const labelMap = { telegram: 'Telegram', discord: 'Discord' };
-        const tokenTail = token.slice(-3);
-        const m = loadMock();
-        // Allow multiple bots per channel type (e.g. two Telegram bots) as
-        // long as the tokens differ. Same exact token = treated as duplicate.
-        if ((m.channels || []).some(c => c.type === channel && c.tokenTail === tokenTail)) {
-          show($('channelMsg'), false, 'Error: this exact token is already saved as ' + (labelMap[channel] || channel));
-          busy(b,false); return;
-        }
-        m.channels = (m.channels || []).concat([{
-          type: channel, label: labelMap[channel] || channel,
-          tokenTail, enabled: true,
-        }]); saveMock(m);
-        show($('channelMsg'), true, 'Added (test mode).');
-        $('token').value = ''; renderConfigured(m); updateStatusFromMock(m);
-        busy(b,false); return;
-      }
-
-      const r = await post('/api/channel', { channel, token });
+      let r;
+      try { r = await post('/api/channel', { channel, token }); }
+      catch(e) { show($('channelMsg'), false, 'Error: could not reach the server'); busy(b,false); return; }
       const ok = r.add && r.add.ok;
       show($('channelMsg'), ok, ok ? 'Connected! Send your bot a message.' : ('Error: ' + ((r.add&&r.add.stderr)||r.error||'unknown')));
-      busy(b,false); if (ok) $('token').value='';
+      busy(b,false); if (ok) { $('token').value=''; loadStatus(); }
     };
 
     function syncMcpHint() {
@@ -1582,38 +1283,27 @@
         name = meta.label; url = meta.url || '';
       }
 
-      if (MOCK_MODE) {
-        if (!apiKey) { show($('mcpMsg'), false, 'Error: API key required'); busy(b, false); return; }
-        if (provider === 'custom') {
-          if (!name || !url) { show($('mcpMsg'), false, 'Error: fill in name and URL'); busy(b, false); return; }
-          if (!/^https?:\/\//.test(url)) { show($('mcpMsg'), false, 'Error: URL must start with http:// or https://'); busy(b, false); return; }
-        }
-        const keyTail = apiKey.slice(-3);
-        const rec = { name, url, keyTail, enabled: true };
-        const m = loadMock();
-        if ((m.mcps || []).some(x => mcpId(x) === mcpId(rec))) {
-          show($('mcpMsg'), false, 'Error: this exact key is already saved for ' + name);
-          busy(b, false); return;
-        }
-        m.mcps = (m.mcps || []).concat([rec]); saveMock(m);
-        show($('mcpMsg'), true, 'MCP added (test mode).');
-        $('mcpKey').value = ''; $('mcpName').value = ''; $('mcpUrl').value = '';
-        renderConfigured(m); updateStatusFromMock(m);
-        busy(b, false); return;
+      if (!apiKey) { show($('mcpMsg'), false, 'Error: API key required'); busy(b, false); return; }
+      if (provider === 'custom') {
+        if (!name || !url) { show($('mcpMsg'), false, 'Error: fill in name and URL'); busy(b, false); return; }
+        if (!/^https?:\/\//.test(url)) { show($('mcpMsg'), false, 'Error: URL must start with http:// or https://'); busy(b, false); return; }
       }
 
       const body = { provider, apiKey };
       if (provider === 'custom') { body.name = name; body.url = url; }
-      const r = await post('/api/mcp', body);
+      let r;
+      try { r = await post('/api/mcp', body); }
+      catch(e) { show($('mcpMsg'), false, 'Error: could not reach the server'); busy(b, false); return; }
       const ok = r.add && r.add.ok;
       show($('mcpMsg'), ok, ok ? 'MCP added.' : ('Error: ' + ((r.add && r.add.stderr) || r.error || 'unknown')));
       busy(b, false); if (ok) { $('mcpKey').value = ''; $('mcpName').value = ''; $('mcpUrl').value = ''; loadStatus(); }
     };
 
-    // Settings footer: logout. (Session destruction gets wired later.)
+    // Top-bar sign-out. Auth isn't wired yet, so this is cosmetic: try to POST
+    // /logout (ignored if the endpoint doesn't exist) then navigate to /login.
     $('logoutBtn').addEventListener('click', async () => {
       try { await fetch('/logout', { method: 'POST' }); } catch(_) {}
-      window.location = '/login.html';
+      window.location = '/login';
     });
 
     // === boot ===
