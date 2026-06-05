@@ -23,10 +23,12 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const avotsOAuth = require('./avots-oauth');
+const { createAuth } = require('./auth');
 
 const app = express();
 app.use(express.json({ limit: '64kb' }));
-app.use(express.static(path.join(__dirname, 'public')));
+// NOTE: static is mounted AFTER the auth gate further down, so unauthenticated
+// requests can't read index.html / the app assets. Only the login page is public.
 
 const PORT = Number(process.env.PANEL_PORT || 19000);
 
@@ -67,6 +69,26 @@ function saveBrandName(name) {
   fs.mkdirSync(STATE_DIR, { recursive: true, mode: 0o700 });
   fs.writeFileSync(BRAND_FILE, JSON.stringify({ name }, null, 2), { mode: 0o600 });
 }
+
+// === authentication ========================================================
+// The panel sets API keys and is public on :8443, so everything below the gate
+// requires a session. Only the login page + /login + /logout are public; the
+// gate 401s /api/* and redirects any other unauthenticated navigation to /login.
+const auth = createAuth({ stateDir: STATE_DIR });
+const LOGIN_PAGE = path.join(__dirname, 'public', 'login.html');
+
+// GET /login (and /login.html): serve the login page; if already signed in,
+// skip it and go to the panel.
+app.get(['/login', '/login.html'], (req, res) => {
+  if (auth.isAuthed(req)) return res.redirect(302, '/');
+  res.sendFile(LOGIN_PAGE);
+});
+app.post('/login', (req, res) => auth.handleLogin(req, res));
+app.post('/logout', (req, res) => auth.handleLogout(req, res));
+
+// Everything registered after this line is protected.
+app.use(auth.gate);
+app.use(express.static(path.join(__dirname, 'public')));
 
 // === avots auto-preconnect (turnkey) =======================================
 // Same two hooks as Phase 1, in order:

@@ -35,4 +35,16 @@ PRODUCT=hermes PANEL_PORT=8080 PANEL_DOMAIN=vps-60-156.cloudhosting.lv node serv
 ## Notes
 - `openclaw` adapter needs the host CLI + a user systemd unit, so for OpenClaw the panel
   is deployed **natively** (not this container image); the image suits hermes/builders.
-- Login is username/password (set out of band). OAuth (device flow) is a later phase.
+
+## Authentication
+The whole panel is behind a single shared login (`auth.js`):
+- **Username** `PANEL_USERNAME` (default `admin`, pre-filled in the form), **password** `PANEL_PASSWORD`.
+- A good `POST /login` mints an **HMAC-signed, HttpOnly, Secure, SameSite=Lax** session cookie
+  (7-day TTL); the signing secret is a per-VM `session.key` (0600) so sessions survive restarts.
+- Everything except the login page + `/login` + `/logout` is gated: `/api/*` → `401`, any other
+  navigation → `302 /login`. The browser bounces to `/login` on any `401` (expired session).
+- **Fail closed in production:** with `PANEL_REQUIRE_AUTH=1` (set in the VM compose) an empty
+  `PANEL_PASSWORD` refuses to start. Without it (local dev) the panel logs a loud warning and
+  runs open. `PANEL_COOKIE_INSECURE=1` drops the `Secure` flag for plain-HTTP local testing.
+- The Avots OAuth (DCR + PKCE) "Connect" button is a separate, additive flow for the *AI provider*;
+  it is unrelated to this panel login.

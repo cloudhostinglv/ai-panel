@@ -611,6 +611,22 @@
 
   <script>
     const $ = (id) => document.getElementById(id);
+
+    // If the session expires (or was never established), any panel request comes
+    // back 401 from the auth gate. Bounce to the login page once, globally, so
+    // every call site (status, pricing, the POST helpers) is covered.
+    (function () {
+      const _fetch = window.fetch.bind(window);
+      let redirecting = false;
+      window.fetch = (...args) => _fetch(...args).then((r) => {
+        if (r.status === 401 && !redirecting) {
+          redirecting = true;
+          window.location = '/login';
+        }
+        return r;
+      });
+    })();
+
     const post = (url, body) => fetch(url, { method:'POST', headers:{'content-type':'application/json'}, body:JSON.stringify(body) }).then(r=>r.json());
 
     // === i18n ===
