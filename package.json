@@ -1,0 +1,14 @@
+{
+  "name": "clawpanel",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Branded client control panel for an OpenClaw VPS",
+  "main": "server.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.22.2"
+  }
+}

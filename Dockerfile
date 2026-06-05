@@ -1,31 +1,15 @@
-# CloudHosting AI Panel — slim, non-root image.
-FROM python:3.12-slim
-
-# No bytecode files, unbuffered logs.
-ENV PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONUNBUFFERED=1 \
-    PANEL_PORT=8080
-
+# CloudHosting AI Panel — product-aware control panel (Node/Express).
+# One image, behaviour selected at runtime by the PRODUCT env var
+# (openclaw | hermes | flowise | langflow | dify) via adapters/<product>.js.
+# Runs behind Caddy (panel on :8443). NOTE: the openclaw adapter calls the
+# host `openclaw` CLI + `systemctl --user`, which only works when the panel
+# runs NATIVELY on the host (not in this container); this image is for the
+# hermes/builder adapters (config-write / open-product models).
+FROM node:22-slim
 WORKDIR /app
-
-# Install deps first for layer caching.
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
-
-# App code (no secrets are baked in; the API key only ever lands in /data).
-COPY app.py i18n.py providers.py ./
-COPY templates/ ./templates/
-COPY static/ ./static/
-COPY locales/ ./locales/
-
-# Run as a non-root user. uid/gid 10001 is unprivileged; the shared /data volume
-# must be writable by this uid on the host (chown it at provision time).
-RUN useradd --uid 10001 --user-group --no-create-home --shell /usr/sbin/nologin panel \
- && mkdir -p /data && chown panel:panel /data
-USER panel
-
+COPY package.json ./
+RUN npm install --omit=dev && npm cache clean --force
+COPY . .
+ENV NODE_ENV=production PANEL_PORT=8080
 EXPOSE 8080
-
-# PANEL_PORT is read by the shell at start; default 8080. Plain HTTP — TLS is
-# terminated by Caddy in front. PANEL_PASSWORD must be set or the app exits.
-CMD ["sh", "-c", "exec uvicorn app:app --host 0.0.0.0 --port ${PANEL_PORT:-8080}"]
+CMD ["node", "server.js"]
