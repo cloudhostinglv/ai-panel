@@ -1,0 +1,83 @@
+# docker-compose.fragment.yml — how to add the CloudHosting AI Panel to a
+# product's compose. This is a FRAGMENT to copy into an existing stack
+# (e.g. flowise-vm/docker-compose.yml), not a standalone file.
+#
+# Key points:
+#   * The panel container is UNPRIVILEGED. It mounts ONLY the shared product
+#     data dir as /data and has NO docker.sock. It writes the agent config +
+#     .env into /data and touches /data/.apply-request; the HOST-side
+#     systemd applier (see applier/) does the docker compose restart.
+#   * It serves PLAIN HTTP on PANEL_PORT. TLS is terminated by Caddy in front.
+#   * PANEL_PASSWORD must be set or the panel refuses to start (fail closed).
+#
+# For AGENTS (hermes/openclaw): mount the SAME host data dir the agent uses as
+#   /data so the panel writes the file the agent reads.
+#     hermes:   ./data            (agent mounts it as /opt/data)
+#     openclaw: ${OPENCLAW_CONFIG_DIR:-/home/node/.openclaw}
+# For BUILDERS (flowise/langflow/dify): the panel writes no keys, but you can
+#   still run it as a branded landing/manual page. /data can be a throwaway dir.
+
+services:
+  ai-panel:
+    build: ./ai-panel            # or pin a pre-built image: image: ghcr.io/<you>/ai-panel:<tag>
+    container_name: ai-panel
+    restart: unless-stopped
+    environment:
+      PRODUCT: "${PRODUCT}"                  # hermes|openclaw|flowise|langflow|dify
+      PANEL_PASSWORD: "${PANEL_PASSWORD}"    # REQUIRED — fail closed if empty
+      PANEL_PORT: "${PANEL_PORT:-8080}"
+      PANEL_DOMAIN: "${PANEL_DOMAIN}"        # public host (for builder "Open <product>" link)
+    volumes:
+      # Mount the SHARED product data dir as /data. EXAMPLE for hermes (./data is
+      # what the gateway mounts as /opt/data). Swap per product (see header).
+      - ./data:/data
+    # Reachable only on the internal compose network as ai-panel:8080; Caddy
+    # fronts it. Do NOT publish this port on 0.0.0.0.
+    expose:
+      - "8080"
+    networks:
+      - internal            # match the product stack's network name
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    # NO docker.sock mount — by design. The host applier holds docker access.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+# ---------------------------------------------------------------------------
+# Caddy route — serve the panel under /setup on the product domain (recommended),
+# so the builder UI stays at / and the onboarding panel at /<domain>/setup.
+# Add to the product's Caddyfile inside the {$DOMAIN} site block:
+#
+#   {$DOMAIN} {
+#       encode zstd gzip
+#
+#       # Onboarding / setup panel (path-prefixed). handle_path strips /setup so
+#       # the panel sees "/" internally.
+#       handle_path /setup* {
+#           reverse_proxy ai-panel:8080
+#       }
+#
+#       # The product UI stays at the root.
+#       handle {
+#           reverse_proxy flowise:3000        # or langflow:7860 / 127.0.0.1:8080 (dify) / etc.
+#       }
+#   }
+#
+# ALTERNATIVELY, give the panel its OWN subdomain:
+#
+#   setup.{$DOMAIN} {
+#       encode zstd gzip
+#       reverse_proxy ai-panel:8080
+#   }
+#
+# For the AGENT products (hermes/openclaw) there is NO Caddy/TLS in their base
+# stack (outbound-only). To expose the panel on those VMs you must ADD a Caddy
+# service + open 80/443, OR reach the panel over an SSH tunnel:
+#   ssh -L 8080:localhost:8080 <vm>   (after publishing 127.0.0.1:8080 on ai-panel)
+# Treat the panel as sensitive (it sets the API key); prefer TLS + the password.
+# ---------------------------------------------------------------------------

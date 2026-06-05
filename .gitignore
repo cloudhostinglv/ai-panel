@@ -1,0 +1,12 @@
+# Never commit a real .env (the panel password lives here for local dev).
+**/.env
+!**/.env.example
+# The shared data volume (holds the client's API key + agent config) is never
+# part of the repo; it lives on the VM under /data.
+data/
+/data/
+*.key
+*.pem
+*.log
+__pycache__/
+*.pyc

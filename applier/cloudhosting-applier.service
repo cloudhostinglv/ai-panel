@@ -1,0 +1,25 @@
+# Runs the host-side applier when the panel signals a config change.
+# Triggered by cloudhosting-applier.path (oneshot — it restarts the agent
+# container via docker compose, then exits). This service, NOT the web panel,
+# holds docker access; the panel container never sees docker.sock.
+
+[Unit]
+Description=CloudHosting AI Panel applier (restart agent on config change)
+# Don't thrash if many .apply-request touches arrive in a burst.
+StartLimitIntervalSec=30
+StartLimitBurst=5
+
+[Service]
+Type=oneshot
+# Per-VM product + compose path. apply.sh also reads this file directly.
+EnvironmentFile=/etc/cloudhosting-panel.env
+ExecStart=/usr/local/lib/cloudhosting/apply.sh
+# This unit must run as a user able to talk to docker (root, or a user in the
+# 'docker' group). It is the trusted boundary; keep it minimal.
+# Light hardening — it needs docker + the compose/data dirs, nothing else.
+ProtectHome=true
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

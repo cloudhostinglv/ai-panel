@@ -1,0 +1,29 @@
+# Watches the shared data volume for the panel's apply signal.
+# The web panel (unprivileged) writes /data/.apply-request with a timestamp; this
+# path unit fires cloudhosting-applier.service whenever that file changes, which
+# runs apply.sh on the HOST (docker control stays off the web surface).
+#
+# Install (host):
+#   sudo cp cloudhosting-applier.path    /etc/systemd/system/
+#   sudo cp cloudhosting-applier.service /etc/systemd/system/
+#   sudo cp apply.sh /usr/local/lib/cloudhosting/apply.sh && sudo chmod 755 /usr/local/lib/cloudhosting/apply.sh
+#   # tell the applier which product + compose file this VM is:
+#   printf 'PRODUCT=hermes\nCOMPOSE_FILE=/srv/ai-vms/hermes-vm/docker-compose.yml\nDATA_DIR=/srv/ai-vms/hermes-vm/data\n' \
+#     | sudo tee /etc/cloudhosting-panel.env
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now cloudhosting-applier.path
+#
+# Adjust PathChanged to the ACTUAL host path of the shared data dir if it is not
+# /srv/ai-vms/<product>/data (it must match the volume the panel mounts as /data).
+
+[Unit]
+Description=Watch for CloudHosting AI Panel apply requests
+
+[Path]
+# Host path of /data/.apply-request. Change <product> to this VM's product, or
+# point at wherever the shared data dir actually lives on the host.
+PathChanged=/srv/ai-vms/hermes-vm/data/.apply-request
+Unit=cloudhosting-applier.service
+
+[Install]
+WantedBy=multi-user.target

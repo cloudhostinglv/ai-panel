@@ -1,0 +1,196 @@
+<!DOCTYPE html>
+<html lang="{{ default_lang }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>CloudHosting AI Panel</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="icon" href="/static/logo.svg" type="image/svg+xml">
+</head>
+<body data-product="{{ product }}" data-is-agent="{{ 'true' if is_agent else 'false' }}">
+  <header class="topbar">
+    <div class="brand">
+      <img src="/static/logo.svg" alt="CloudHosting" class="logo">
+      <span class="brand-name" data-i="brand">CloudHosting AI Panel</span>
+      {% if product_info %}<span class="product-pill">{{ product_info.name }}</span>{% endif %}
+    </div>
+    <div class="topbar-right">
+      <div class="lang-toggle" role="group" aria-label="Language">
+        <button type="button" class="lang-btn" data-lang="ru">RU</button>
+        <button type="button" class="lang-btn" data-lang="en">EN</button>
+      </div>
+      {% if not login_mode %}
+        <a class="logout-link" href="/logout" data-i="logout">Sign out</a>
+      {% endif %}
+    </div>
+  </header>
+
+  <main class="wrap">
+
+  {% if login_mode %}
+    {# ---------------- Login ---------------- #}
+    <section class="card login-card">
+      <h1 data-i="login_title">Sign in</h1>
+      <p class="muted" data-i="login_hint">Enter the panel password.</p>
+      {% if login_error %}
+        <p class="error" data-i="login_error">Wrong password. Try again.</p>
+      {% endif %}
+      <form method="post" action="/login" class="stack">
+        <label data-i="login_password">Password</label>
+        <input type="password" name="password" autocomplete="current-password" required autofocus>
+        <button type="submit" class="btn primary" data-i="login_button">Sign in</button>
+      </form>
+    </section>
+
+  {% elif not product_info %}
+    {# ---------------- Misconfigured ---------------- #}
+    <section class="card">
+      <h1 data-i="brand">CloudHosting AI Panel</h1>
+      <p class="error" data-i="missing_product">This panel has no PRODUCT configured.</p>
+    </section>
+
+  {% else %}
+    <section class="hero">
+      <h1 data-i="brand">CloudHosting AI Panel</h1>
+      <p class="tagline" data-i="tagline">Set up your private AI in a few clicks.</p>
+    </section>
+
+    {% if is_agent %}
+      {# ============================ AGENT FLOW ============================ #}
+      <p class="intro" data-i="agent_intro"></p>
+
+      {# --- Status indicator --- #}
+      <section class="card status-card">
+        <h2 data-i="status_section">Status</h2>
+        <div class="status-row">
+          <span id="status-dot" class="dot dot-unknown"></span>
+          <span id="status-text" data-i="status_checking">Checking...</span>
+          <button type="button" id="recheck-btn" class="btn small" data-i="recheck">Re-check</button>
+        </div>
+      </section>
+
+      {# --- Provider cards --- #}
+      <section class="card">
+        <h2 data-i="provider_section">1. Choose a provider</h2>
+        <div class="provider-grid">
+          {% for p in providers %}
+          <label class="provider-card{{ ' recommended' if p.recommended else '' }}">
+            <input type="radio" name="provider" value="{{ p.id }}"
+                   data-baseurl="{{ p.base_url }}"
+                   data-prefix="{{ p.key_prefix }}"
+                   data-model="{{ p.default_model }}"
+                   {{ 'checked' if p.recommended else '' }}>
+            <div class="provider-head">
+              <span class="provider-name">{{ p.name }}</span>
+              {% if p.recommended %}<span class="badge" data-i="recommended">Recommended</span>{% endif %}
+            </div>
+            <p class="provider-blurb" data-blurb-ru="{{ p.blurb.ru }}" data-blurb-en="{{ p.blurb.en }}">{{ p.blurb.en }}</p>
+            <dl class="provider-meta">
+              <dt data-i="default_model_label">Suggested model</dt><dd>{{ p.default_model }}</dd>
+              <dt data-i="key_prefix_label">Key starts with</dt><dd><code>{{ p.key_prefix }}</code></dd>
+              <dt data-i="signup_label">Get a key</dt><dd><a href="{{ p.signup_url }}" target="_blank" rel="noopener">{{ p.signup_url }}</a></dd>
+            </dl>
+          </label>
+          {% endfor %}
+        </div>
+      </section>
+
+      {# --- Key form --- #}
+      <section class="card">
+        <h2 data-i="key_section">2. Connect your key</h2>
+        <form id="provider-form" class="stack">
+          <label data-i="api_key_label">API key</label>
+          <input type="password" id="api_key" name="api_key" data-i-ph="api_key_ph" required>
+          <label data-i="model_label">Model id (optional)</label>
+          <input type="text" id="model" name="model" data-i-ph="model_ph">
+          <button type="submit" class="btn primary" data-i="save_connect">Save &amp; connect</button>
+          <p id="provider-msg" class="form-msg" role="status"></p>
+        </form>
+      </section>
+
+      {# --- Telegram guide (agents only) --- #}
+      {% if product_info.telegram %}
+      <section class="card">
+        <h2 data-i="telegram_section">Create a Telegram bot</h2>
+        <p class="intro" data-i="telegram_intro"></p>
+        <h3 data-i="telegram_steps_title">Steps</h3>
+        <ol class="steps">
+          <li data-i="telegram_step_1"></li>
+          <li data-i="telegram_step_2"></li>
+          <li data-i="telegram_step_3"></li>
+          <li data-i="telegram_step_4"></li>
+          <li data-i="telegram_step_5"></li>
+        </ol>
+        <form id="telegram-form" class="stack">
+          <label data-i="telegram_token_label">Bot token</label>
+          <input type="text" id="tg_token" name="token" data-i-ph="telegram_token_ph" required>
+          <label data-i="telegram_owner_label">Your Telegram user id</label>
+          <input type="text" id="tg_owner" name="owner_id" data-i-ph="telegram_owner_ph">
+          <button type="submit" class="btn primary" data-i="telegram_save">Save Telegram settings</button>
+          <p id="telegram-msg" class="form-msg" role="status"></p>
+        </form>
+      </section>
+      {% endif %}
+
+    {% else %}
+      {# ============================ BUILDER FLOW ============================ #}
+      <p class="intro" data-i="builder_intro"></p>
+
+      <section class="card open-card">
+        <a class="btn primary big"
+           href="{{ ('https://' + panel_domain) if panel_domain else '/' }}"
+           target="_blank" rel="noopener"
+           data-i="open_product" data-i-arg-product="{{ product_info.name }}">Open {{ product_info.name }}</a>
+        <p class="muted" data-i="open_product_hint" data-i-arg-product="{{ product_info.name }}"></p>
+      </section>
+
+      {# Provider guidance (avots-first) for builders — informational only. #}
+      <section class="card">
+        <h2 data-i="provider_section">1. Choose a provider</h2>
+        <div class="provider-grid">
+          {% for p in providers %}
+          <div class="provider-card{{ ' recommended' if p.recommended else '' }}">
+            <div class="provider-head">
+              <span class="provider-name">{{ p.name }}</span>
+              {% if p.recommended %}<span class="badge" data-i="recommended">Recommended</span>{% endif %}
+            </div>
+            <p class="provider-blurb" data-blurb-ru="{{ p.blurb.ru }}" data-blurb-en="{{ p.blurb.en }}">{{ p.blurb.en }}</p>
+            <dl class="provider-meta">
+              <dt data-i="base_url_label">Endpoint</dt><dd><code>{{ p.base_url }}</code></dd>
+              <dt data-i="default_model_label">Suggested model</dt><dd>{{ p.default_model }}</dd>
+              <dt data-i="signup_label">Get a key</dt><dd><a href="{{ p.signup_url }}" target="_blank" rel="noopener">{{ p.signup_url }}</a></dd>
+            </dl>
+          </div>
+          {% endfor %}
+        </div>
+      </section>
+    {% endif %}
+
+    {# --- Manual (always shown) --- #}
+    <section class="card">
+      <h2 data-i="manual_section">How to use it</h2>
+      <h3 data-i="manual_generic_title">General</h3>
+      <ul id="manual-generic" class="bullets"></ul>
+      <h3 id="manual-product-title" data-i="manual_product_title" data-i-arg-product="{{ product_info.name }}"></h3>
+      <ul id="manual-product" class="bullets"></ul>
+    </section>
+
+  {% endif %}
+
+  </main>
+
+  <footer class="footer">
+    <span data-i="footer">Powered by CloudHosting.</span>
+  </footer>
+
+  <script>
+    window.I18N = {{ strings_json | safe }};
+    window.PANEL = {
+      defaultLang: "{{ default_lang }}",
+      product: "{{ product }}",
+      isAgent: {{ 'true' if is_agent else 'false' }}
+    };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>
