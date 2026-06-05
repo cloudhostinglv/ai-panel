@@ -95,6 +95,25 @@ function resolveProvider(provider, custom, modelOverride) {
   return { baseURL: p.baseURL, model, label: p.label };
 }
 
+// Build a short, masked fingerprint of a secret so the UI can tell two keys
+// apart without ever exposing the whole thing: a little of the head + the tail,
+// e.g. "av_mcp…a1b2". Never returns more than head(6)+tail(4) of the original.
+function maskKey(key) {
+  const k = (key == null ? '' : String(key)).trim();
+  if (!k) return null;
+  if (k.length <= 6) return '…' + k.slice(-Math.min(2, k.length));
+  return k.slice(0, 6) + '…' + k.slice(-4);
+}
+
+// Resolve a display hint for a stored item: prefer a saved keyHint, else derive
+// from a full secret if we still hold it, else fall back to a saved tail.
+function hintOf(o, fullKey) {
+  if (o && o.keyHint) return o.keyHint;
+  if (fullKey) return maskKey(fullKey);
+  const tail = o && (o.keyTail || o.tokenTail);
+  return tail ? '…' + String(tail) : null;
+}
+
 // --- data-dir read/merge helpers --------------------------------------------
 // We keep a tiny side-car JSON (panel-state.json) holding the structured view of
 // what the panel has configured, because config.yaml/.env are flat and we need
@@ -288,17 +307,17 @@ module.exports = {
     // name. Empty arrays / null where nothing is configured.
     const configured = {
       primary: st.primary
-        ? { id: st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model }
+        ? { id: st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model, keyHint: hintOf(st.primary, st.primary.apiKey) }
         : null,
       fallbacks: (st.fallbacks || [])
         .filter((f) => f && f.enabled !== false)
-        .map((f) => ({ id: f.model, label: f.label, model: f.model })),
+        .map((f) => ({ id: f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey) })),
       channels: (st.channels || [])
         .filter((c) => c && c.enabled !== false)
-        .map((c) => ({ id: c.type, type: c.type, label: c.label })),
+        .map((c) => ({ id: c.type, type: c.type, label: c.label, keyHint: hintOf(c, c.token) })),
       mcps: (st.mcps || [])
         .filter((x) => x && x.enabled !== false)
-        .map((x) => ({ id: x.name, name: x.name, url: x.url })),
+        .map((x) => ({ id: x.name, name: x.name, url: x.url, keyHint: hintOf(x, x.apiKey) })),
     };
 
     return {
@@ -316,7 +335,7 @@ module.exports = {
     if (r.error) return { error: r.error };
 
     const st = loadState();
-    st.primary = { provider, label: r.label, model: r.model, baseURL: r.baseURL, apiKey: apiKey.trim() };
+    st.primary = { provider, label: r.label, model: r.model, baseURL: r.baseURL, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()) };
     saveState(st);
     const apply = applyAll(st, 'set-primary');
     // Shape mirrors openclaw: front-end checks r.auth.ok && (!r.set || r.set.ok).
@@ -340,7 +359,7 @@ module.exports = {
 
     const st = loadState();
     st.fallbacks = st.fallbacks || [];
-    st.fallbacks.push({ provider, label: r.label, model: r.model, baseURL: r.baseURL, keyTail: apiKey.trim().slice(-3), enabled: true });
+    st.fallbacks.push({ provider, label: r.label, model: r.model, baseURL: r.baseURL, keyTail: apiKey.trim().slice(-3), keyHint: maskKey(apiKey.trim()), enabled: true });
     saveState(st);
     const apply = applyAll(st, 'add-fallback');
     return {
@@ -385,6 +404,7 @@ module.exports = {
       label: CHANNELS[channel],
       token: token.trim(),
       tokenTail: token.trim().slice(-3),
+      keyHint: maskKey(token.trim()),
       allowedUsers: typeof allowedUsers === 'string' ? allowedUsers.trim() : '',
       enabled: true,
     });
@@ -424,7 +444,7 @@ module.exports = {
     // entry (otherwise a stale keyless entry + the new one would emit a duplicate
     // `<name>:` key under mcp_servers in config.yaml).
     st.mcps = (st.mcps || []).filter((x) => x.name !== name);
-    st.mcps.push({ name, url, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), enabled: true });
+    st.mcps.push({ name, url, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), keyHint: maskKey(apiKey.trim()), enabled: true });
     saveState(st);
     const apply = applyAll(st, 'add-mcp');
     return {
@@ -461,6 +481,7 @@ module.exports = {
       model: PROVIDERS.avots.defaultModel,
       baseURL: PROVIDERS.avots.baseURL,
       apiKey: key.trim(),
+      keyHint: maskKey(key.trim()),
     };
     saveState(st);
     const apply = applyAll(st, 'preconnect-avots');

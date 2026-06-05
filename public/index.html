@@ -330,6 +330,14 @@
       font-size: 12px; color: var(--mut);
       overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
     }
+    /* Masked key fingerprint chip (start…end) so two entries are tellable apart. */
+    .configured .item .keyhint {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 11px; color: var(--mut);
+      background: var(--card); border: 1px solid var(--line);
+      border-radius: 6px; padding: 1px 6px; margin-left: 6px;
+      vertical-align: 1px; white-space: nowrap; cursor: default;
+    }
     button.remove {
       margin: 0; width: 28px; height: 28px; padding: 0;
       background: transparent; color: var(--mut);
@@ -672,6 +680,7 @@
         cfgEnabledMcp: 'Enabled', cfgDisabledMcp: 'Disabled (saved but inactive)',
         cfgActive: 'active', cfgOff: 'off',
         moveUp: 'Move up', moveDown: 'Move down', remove: 'Remove',
+        keyHintTitle: 'Key fingerprint (start…end) - to tell keys apart; not the full key',
         msgSaving: 'Saving…', msgAdding: 'Adding…', msgConnecting: 'Connecting…',
         msgAiSaved: 'AI saved and active.',
         msgFbAdded: 'Fallback AI added.',
@@ -1235,8 +1244,11 @@
         `<div class="configured-title">${esc(title)}</div>` +
         list.map((it) => {
           const detail = it.detail ? `<span class="detail">${esc(it.detail)}</span>` : '';
+          // Masked key fingerprint (start…end) so two entries with different keys
+          // are tellable apart. Only shown when the adapter provides one.
+          const hint = it.keyHint ? ` <code class="keyhint" title="${esc(T('keyHintTitle'))}">${esc(it.keyHint)}</code>` : '';
           return `<div class="item">` +
-            `<div class="meta"><span class="label">${esc(it.label)}</span>${detail}</div>` +
+            `<div class="meta"><span class="label">${esc(it.label)}${hint}</span>${detail}</div>` +
             `<button class="remove" type="button" title="${esc(T('remove'))}" aria-label="${esc(T('remove'))}" ` +
               `data-remove-url="${esc(removeUrl)}" data-remove-id="${esc(it.id)}">${trashSvg}</button>` +
           `</div>`;
@@ -1250,19 +1262,19 @@
       cfg = cfg || {};
       // Primary AI (single row or hidden).
       const primary = (cap.primary !== false && cfg.primary)
-        ? [{ id: cfg.primary.id, label: cfg.primary.label || cfg.primary.model || 'Primary AI', detail: cfg.primary.model || '' }]
+        ? [{ id: cfg.primary.id, label: cfg.primary.label || cfg.primary.model || 'Primary AI', detail: cfg.primary.model || '', keyHint: cfg.primary.keyHint }]
         : [];
       renderConfiguredList('primaryConfigured', T('cfgActivePrimary'), primary, '/api/primary/remove');
 
       // Fallback AI list.
       const fallbacks = (cap.fallback !== false && Array.isArray(cfg.fallbacks))
-        ? cfg.fallbacks.map((f) => ({ id: f.id, label: f.label || f.model, detail: f.model || '' }))
+        ? cfg.fallbacks.map((f) => ({ id: f.id, label: f.label || f.model, detail: f.model || '', keyHint: f.keyHint }))
         : [];
       renderConfiguredList('fallbacksConfigured', T('cfgSavedFallbacks'), fallbacks, '/api/fallback/remove');
 
       // Messaging channels.
       const channels = (cap.messaging !== false && Array.isArray(cfg.channels))
-        ? cfg.channels.map((c) => ({ id: c.id, label: c.label || c.type, detail: '' }))
+        ? cfg.channels.map((c) => ({ id: c.id, label: c.label || c.type, detail: '', keyHint: c.keyHint }))
         : [];
       renderConfiguredList('channelsConfigured', T('cfgConnectedChannels'), channels, '/api/channel/remove');
 
@@ -1271,7 +1283,7 @@
         ? cfg.mcps.map((m) => {
             let host = '';
             try { host = m.url ? new URL(m.url).host : ''; } catch (_) { host = m.url || ''; }
-            return { id: m.id, label: m.name || m.id, detail: host };
+            return { id: m.id, label: m.name || m.id, detail: host, keyHint: m.keyHint };
           })
         : [];
       renderConfiguredList('mcpConfigured', T('cfgConnectedMcps'), mcps, '/api/mcp/remove');
