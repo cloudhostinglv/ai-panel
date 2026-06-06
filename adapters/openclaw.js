@@ -204,7 +204,12 @@ function writeConfig(state) {
       defaults: {
         model: primary ? { primary: `${primary.providerId || primary.provider}/${primary.model}` } : {},
         models: allowlist,
-        sandbox: { mode: 'all', workspaceAccess: 'none' },
+        // sandbox 'all' on this OpenClaw build requires a Docker backend INSIDE the
+        // gateway container; we deliberately don't mount docker.sock (that = host
+        // root). So 'off': the single-tenant VM/container IS the boundary (cap_drop
+        // ALL, no-new-privileges, no docker.sock), like Hermes. Non-owners are blocked
+        // by channel allowFrom and held read-only by tools.toolsBySender['*'].deny.
+        sandbox: { mode: 'off' },
       },
     },
     channels: {},
