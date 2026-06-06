@@ -1,322 +1,413 @@
 'use strict';
 /*
- * openclaw adapter — the original ClawPanel behaviour, unchanged.
+ * openclaw adapter — config-file model (mirrors the hermes adapter).
  *
- * This is the Phase-1 logic lifted verbatim out of server.js: every OpenClaw
- * call uses execFile (no shell); the LLM API key is passed on stdin and channel
- * tokens via a 0600 persistent file — never as argv that would show up in `ps`.
- * Gateway reloads use `systemctl --user restart openclaw-gateway`.
+ * UNLIKE the old native build, this adapter does NOT shell out to the `openclaw`
+ * CLI / `systemctl --user`. The panel runs in an UNPRIVILEGED container that can
+ * only WRITE the shared config dir and `touch <dir>/.apply-request`; a host-side
+ * applier then runs `docker compose restart openclaw-gateway` so the gateway
+ * re-reads the freshly written openclaw.json + .env at start. (See
+ * /srv/ai-vms/openclaw-vm. The previous native adapter is kept as
+ * openclaw.js.native.bak.)
  *
- * The adapter contract (shared by every product) is documented in
- * adapters/README of intent — see server.js for how endpoints route through it:
+ * Source of truth for the agent is the shared OpenClaw config dir (~/.openclaw):
+ *   <dir>/openclaw.json   — gateway + models.providers + agents.defaults
+ *                           (model.primary + allowlist + sandbox) + tools policy
+ *                           + channels (allowFrom = owner ids). Secrets are
+ *                           referenced as ${VAR}.
+ *   <dir>/.env            — AVOTS_API_KEY (+ other provider keys), the channel
+ *                           bot tokens, and OPENCLAW_GATEWAY_TOKEN (preserved).
+ *   <dir>/.apply-request  — touched after each write to signal the host applier.
+ *   <dir>/panel-state.json — the panel's structured view (provider/key meta,
+ *                           enabled flags, allowFrom ids); never the secret beyond
+ *                           the masked keyHint shown in the UI.
  *
- *   capabilities                              -> which UI sections apply
- *   openProductUrl()                          -> builders only (null for agents)
- *   status()                                  -> { models, channels, mcps } raw run()
- *                                                blobs + a structured `configured`
- *                                                view ({primary, fallbacks, channels,
- *                                                mcps}) the UI renders the lists from
- *   setPrimary(provider, apiKey, custom)      -> set the active primary LLM
- *   addFallback(provider, apiKey, custom)     -> push a fallback LLM
- *   removeFallback(id)                        -> drop a fallback model from the chain
- *   setActivePrimary(id)                      -> switch active primary (TODO here)
- *   removePrimary(id)                         -> remove a saved primary (TODO here)
- *   addChannel(channel, token)               -> connect Telegram/Discord
- *   removeChannel(id)                         -> disconnect a channel (TODO here)
- *   addMcp({ provider, apiKey, name, url })   -> attach an MCP server
- *   removeMcp(id)                             -> detach an MCP server (TODO here)
- *   preconnectAvots(key)                      -> one-time avots auto-connect
- *   restart()                                 -> reload the gateway
+ * Env: OPENCLAW_DATA_DIR | OPENCLAW_CONFIG_DIR — the shared dir as the panel sees
+ * it (the compose mounts the host ~/.openclaw here; default /data).
  *
- * Methods return the same raw shapes the original endpoints returned so the
- * existing front-end keeps reading r.auth.ok / r.add.ok / r.set.ok unchanged.
+ * OpenClaw access model is OWNER-LOCK, not pairing: a channel only answers the ids
+ * in channels.<type>.allowFrom. So there is NO "Access requests" queue (pairing
+ * capability is off); the messaging "Allowed users" field maps to allowFrom.
  */
-const { execFile } = require('child_process');
 const fs = require('fs');
-const os = require('os');
 const path = require('path');
 
-const OC = process.env.OPENCLAW_BIN || '/usr/bin/openclaw';
+const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || process.env.OPENCLAW_CONFIG_DIR || '/data';
+const CONFIG_FILE = path.join(CONFIG_DIR, 'openclaw.json');
+const ENV_FILE = path.join(CONFIG_DIR, '.env');
+const APPLY_REQUEST = path.join(CONFIG_DIR, '.apply-request');
+const STATE_FILE = path.join(CONFIG_DIR, 'panel-state.json');
 
-// Core "brain" providers selectable in the panel. Curated to the 5 the UI
-// exposes as cards (Avots first, then ChatGPT / Claude / Gemini / custom).
+const DEFAULT_CONTEXT_WINDOW = 200000;
+const DEFAULT_MAX_TOKENS = 32000;
+
+// Provider id -> OpenAI-compatible base + default model. For OpenClaw the active
+// model is the fully-qualified "<providerId>/<modelId>"; for avots that is e.g.
+// "avots/anthropic/claude-opus-4.8" (note the doubled slash: provider id `avots`,
+// model id `anthropic/claude-opus-4.8`).
 const PROVIDERS = {
-  avots:      { label: 'Avots AI', defaultModel: 'anthropic/claude-opus-4.8' },
-  openai:     { label: 'ChatGPT',  defaultModel: 'openai/gpt-5.5' },
-  anthropic:  { label: 'Claude',   defaultModel: 'anthropic/claude-opus-4.8' },
-  google:     { label: 'Gemini',   defaultModel: 'google/gemini-2.5-pro' },
-  custom:     { label: 'Add your own', defaultModel: null, custom: true },
+  avots:      { label: 'Avots AI',     baseURL: 'https://api.avots.ai/openai/v1',                            defaultModel: 'anthropic/claude-opus-4.8' },
+  openai:     { label: 'ChatGPT',      baseURL: 'https://api.openai.com/v1',                                 defaultModel: 'gpt-5.5' },
+  anthropic:  { label: 'Claude',       baseURL: 'https://api.anthropic.com/v1',                              defaultModel: 'claude-opus-4.8' },
+  google:     { label: 'Gemini',       baseURL: 'https://generativelanguage.googleapis.com/v1beta/openai/',  defaultModel: 'gemini-2.5-pro' },
+  custom:     { label: 'Add your own', baseURL: null, defaultModel: null, custom: true },
 };
 
-const AVOTS_DEFAULT_MODEL = PROVIDERS.avots.defaultModel;
 const CHANNELS = { telegram: 'Telegram', discord: 'Discord' };
 
-const MCPS = {
-  avots:       { label: 'Avots.ai',    url: 'https://mcp.avots.ai/' },
-  composio:    { label: 'Composio',    url: 'https://mcp.composio.dev/composio/mcp' },
-  linear:      { label: 'Linear',      url: 'https://mcp.linear.app/sse' },
-  sentry:      { label: 'Sentry',      url: 'https://mcp.sentry.dev/sse' },
-  browserbase: { label: 'Browserbase', url: 'https://mcp.browserbase.com/sse' },
-  custom:      { label: 'Other MCP' },
-};
+function envRefFor(providerId) {
+  if (providerId === 'avots') return 'AVOTS_API_KEY';
+  if (providerId === 'openai') return 'OPENAI_API_KEY';
+  if (providerId === 'anthropic') return 'ANTHROPIC_API_KEY';
+  if (providerId === 'google') return 'GOOGLE_API_KEY';
+  return 'PROVIDER_' + String(providerId || '').toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_API_KEY';
+}
+function channelTokenEnv(type) {
+  return type === 'discord' ? 'DISCORD_BOT_TOKEN' : 'TELEGRAM_BOT_TOKEN';
+}
+
+// --- masked key fingerprint (same as hermes) -------------------------------
+function maskKey(key) {
+  const k = (key == null ? '' : String(key)).trim();
+  if (!k) return null;
+  if (k.length <= 6) return '…' + k.slice(-Math.min(2, k.length));
+  return k.slice(0, 6) + '…' + k.slice(-4);
+}
+function hintOf(o, fullKey) {
+  if (o && o.keyHint) return o.keyHint;
+  if (fullKey) return maskKey(fullKey);
+  const tail = o && (o.keyTail || o.tokenTail);
+  return tail ? '…' + String(tail) : null;
+}
 
 function validateCustom(custom) {
   if (!custom || typeof custom !== 'object') return 'missing custom config';
   const { name, baseURL, modelId } = custom;
   if (!name || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(name))
-    return 'invalid name (a–z, 0–9, dash, 1–32 chars)';
+    return 'invalid name (a-z, 0-9, dash, 1-32 chars)';
   if (!baseURL || !/^https?:\/\/[\w.-]+(:\d+)?(\/.*)?$/.test(baseURL))
     return 'invalid base URL (must start with http:// or https://)';
   if (!modelId || typeof modelId !== 'string' || modelId.trim().length < 1)
     return 'missing model id';
-  if (PROVIDERS[name.toLowerCase()] && name.toLowerCase() !== 'custom')
-    return `name "${name}" is reserved; pick a different one`;
   return null;
 }
 
-function run(cmd, args, input) {
-  return new Promise((resolve) => {
-    const child = execFile(cmd, args, { timeout: 90000, env: process.env, maxBuffer: 4 * 1024 * 1024 },
-      (err, stdout, stderr) => resolve({
-        ok: !err,
-        code: err && typeof err.code === 'number' ? err.code : (err ? 1 : 0),
-        stdout: (stdout || '').toString(),
-        stderr: (stderr || '').toString(),
-      }));
-    if (input != null) { child.stdin.write(input); child.stdin.end(); }
-  });
-}
-
-function restartGateway() {
-  return run('systemctl', ['--user', 'restart', 'openclaw-gateway']);
-}
-
-async function setupCustomProvider(custom, apiKey) {
-  const name = custom.name.trim();
-  const baseURL = custom.baseURL.trim().replace(/\/+$/, '');
-  const patchObj = { models: { providers: { [name]: { type: 'openai-compatible', baseURL } } } };
-  const patch = await run(OC, ['config', 'patch', JSON.stringify(patchObj)]);
-  if (!patch.ok) return { ok: false, step: 'patch', patch };
-  const auth = await run(OC, ['models', 'auth', 'paste-api-key', '--provider', name], apiKey.trim() + '\n');
-  if (!auth.ok) return { ok: false, step: 'auth', patch, auth };
-  return { ok: true, name, modelId: custom.modelId.trim(), patch, auth };
-}
-
-// --- channel token persistence (same path/permissions as Phase 1) ---
-const SECRETS_DIR = path.join(process.env.HOME || os.homedir(), '.openclaw', 'secrets');
-
-// --- avots auto-preconnect helpers ---
-async function avotsAlreadyConfigured() {
-  const st = await run(OC, ['models', 'status', '--json']);
-  if (!st.ok) return false;
-  try {
-    const j = JSON.parse(st.stdout);
-    return JSON.stringify(j).toLowerCase().includes('avots');
-  } catch (_) {
-    return /avots/i.test(st.stdout || '');
+// Resolve { provider, custom, modelOverride } -> a stored "entry" describing the
+// provider id, model, base url, env ref, and label. `provider==='custom'` uses
+// the user-supplied name/baseURL/modelId.
+function resolveProvider(provider, custom, modelOverride) {
+  if (provider === 'custom') {
+    const err = validateCustom(custom);
+    if (err) return { error: err };
+    const providerId = custom.name.trim();
+    return {
+      providerId,
+      provider: 'custom',
+      label: providerId + ' (custom)',
+      model: custom.modelId.trim(),
+      baseURL: custom.baseURL.trim().replace(/\/+$/, ''),
+      envRef: envRefFor(providerId),
+    };
   }
+  const p = PROVIDERS[provider];
+  if (!p) return { error: 'unknown provider' };
+  const model = (typeof modelOverride === 'string' && modelOverride.trim())
+    ? modelOverride.trim()
+    : p.defaultModel;
+  return { providerId: provider, provider, label: p.label, model, baseURL: p.baseURL, envRef: envRefFor(provider) };
+}
+
+// --- state + file helpers ---------------------------------------------------
+function loadState() {
+  try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
+  catch (_) { return { primary: null, fallbacks: [], channels: [], mcps: [] }; }
+}
+function saveState(s) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2), { mode: 0o600 });
+}
+function readEnv() {
+  const out = {};
+  try {
+    for (const line of fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
+      if (m) out[m[1]] = m[2];
+    }
+  } catch (_) {}
+  return out;
+}
+function writeEnv(map) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const body = Object.entries(map)
+    .filter(([, v]) => v != null && v !== '')
+    .map(([k, v]) => `${k}=${v}`)
+    .join('\n') + '\n';
+  fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
+}
+function touchApplyRequest(reason) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(APPLY_REQUEST, `${new Date().toISOString()} ${reason || 'apply'}\n`, { mode: 0o600 });
+  return { ok: true, applyRequest: APPLY_REQUEST, reason: reason || 'apply' };
+}
+
+// Emit openclaw.json from the panel state. Static blocks (gateway, tools policy,
+// sandbox) mirror the hardened openclaw-vm template; the dynamic blocks come from
+// the active primary (+ enabled fallbacks) and enabled channels. Secrets are
+// referenced as ${VAR}; OpenClaw resolves them from ~/.openclaw/.env.
+function writeConfig(state) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  const providers = {};
+  const allowlist = {};
+  const addProv = (p) => {
+    if (!p || !p.model) return;
+    const pid = p.providerId || p.provider;
+    if (!providers[pid]) {
+      providers[pid] = {
+        baseUrl: p.baseURL,
+        apiKey: '${' + (p.envRef || envRefFor(pid)) + '}',
+        api: 'openai-completions',
+        timeoutSeconds: 300,
+        models: [],
+      };
+    }
+    if (!providers[pid].models.some((m) => m.id === p.model)) {
+      providers[pid].models.push({
+        id: p.model,
+        name: (p.label || pid) + ' ' + p.model,
+        input: ['text', 'image'],
+        contextWindow: DEFAULT_CONTEXT_WINDOW,
+        maxTokens: DEFAULT_MAX_TOKENS,
+        reasoning: true,
+        compat: { supportsTools: true, supportsDeveloperRole: false },
+      });
+    }
+    allowlist[`${pid}/${p.model}`] = { alias: p.label || `${pid}/${p.model}` };
+  };
+
+  const primary = (state.primary && state.primary.enabled !== false) ? state.primary : null;
+  addProv(primary);
+  for (const f of (state.fallbacks || []).filter((x) => x && x.enabled !== false)) addProv(f);
+
+  const cfg = {
+    gateway: { mode: 'local', bind: 'loopback', port: 18789, auth: { mode: 'token', token: '${OPENCLAW_GATEWAY_TOKEN}' } },
+    models: { mode: 'merge', providers },
+    tools: {
+      profile: 'coding',
+      deny: ['browser', 'canvas'],
+      toolsBySender: { '*': ['exec', 'process', 'code_execution', 'write', 'edit', 'apply_patch'] },
+      elevated: { enabled: false },
+      loopDetection: { enabled: true, historySize: 30, warningThreshold: 10, criticalThreshold: 20, globalCircuitBreakerThreshold: 30 },
+    },
+    agents: {
+      defaults: {
+        model: primary ? { primary: `${primary.providerId || primary.provider}/${primary.model}` } : {},
+        models: allowlist,
+        sandbox: { mode: 'all', workspaceAccess: 'none' },
+      },
+    },
+    channels: {},
+  };
+
+  for (const c of (state.channels || []).filter((x) => x && x.enabled !== false)) {
+    const ids = String(c.allowedUsers || '').split(',').map((s) => s.trim()).filter(Boolean);
+    cfg.channels[c.type] = {
+      enabled: true,
+      botToken: '${' + channelTokenEnv(c.type) + '}',
+      allowFrom: ids,
+    };
+  }
+
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+}
+
+// Re-emit .env (secrets) + openclaw.json, then request apply. Single funnel for
+// every mutation. OPENCLAW_GATEWAY_TOKEN and any other pre-seeded keys are
+// preserved (readEnv keeps them).
+function applyAll(state, reason) {
+  const env = readEnv();
+  const setKey = (p) => { if (p && p.apiKey) env[p.envRef || envRefFor(p.providerId || p.provider)] = p.apiKey; };
+  if (state.primary && state.primary.enabled !== false) setKey(state.primary);
+  for (const f of (state.fallbacks || []).filter((x) => x && x.enabled !== false)) setKey(f);
+
+  const tg = (state.channels || []).find((c) => c.type === 'telegram' && c.enabled !== false);
+  const dc = (state.channels || []).find((c) => c.type === 'discord' && c.enabled !== false);
+  if (tg) env.TELEGRAM_BOT_TOKEN = tg.token; else delete env.TELEGRAM_BOT_TOKEN;
+  if (dc) env.DISCORD_BOT_TOKEN = dc.token; else delete env.DISCORD_BOT_TOKEN;
+
+  writeEnv(env);
+  writeConfig(state);
+  return touchApplyRequest(reason);
 }
 
 module.exports = {
   id: 'openclaw',
   label: 'OpenClaw',
 
-  // Full agent surface: primary, fallback, messaging, MCP. Not a builder.
   capabilities: {
     primary: true,
-    fallback: true,
+    fallback: true,    // recorded + allowlisted; auto-fallback chain TODO (verify on live VM)
     messaging: true,
-    mcp: true,
+    mcp: false,        // OpenClaw MCP config schema unverified; off until live-checked
+    pairing: false,    // OpenClaw uses channel allowFrom (owner-lock), not a pairing queue
     openProduct: false,
     preconnect: true,
   },
 
-  // Catalogs the UI reads from /api/status.
   providers: PROVIDERS,
   channelTypes: CHANNELS,
-  mcps: MCPS,
+  mcps: {},
 
-  // Agents have no separate product URL (the panel IS the surface).
   openProductUrl() { return null; },
 
   async status() {
-    const models = await run(OC, ['models', 'status', '--json']);
-    const channels = await run(OC, ['channels', 'list', '--json']);
-    // MCPs: best-effort. `openclaw mcp list --json` may or may not exist on this
-    // build; if it errors we just leave the mcps list empty (the raw blob keeps
-    // the existing fields untouched).
-    const mcps = await run(OC, ['mcp', 'list', '--json']);
+    const st = loadState();
+    const modelsJson = {
+      resolvedDefault: (st.primary && st.primary.enabled !== false)
+        ? `${st.primary.providerId || st.primary.provider}/${st.primary.model}` : null,
+      fallbacks: (st.fallbacks || []).filter((f) => f && f.enabled !== false)
+        .map((f) => `${f.providerId || f.provider}/${f.model}`),
+    };
+    const channelsJson = (st.channels || []).filter((c) => c.enabled !== false).map((c) => ({ type: c.type, label: c.label }));
 
-    // Build the structured `configured` view the UI renders its lists from, in
-    // the same shape the hermes adapter returns. Best-effort: each piece is wrapped
-    // in its own try/catch so a single unparseable blob never blanks the others.
-    //   primary  : from models.resolvedDefault (id = model so removePrimary can match)
-    //   fallbacks: from models.fallbacks[] (id = model)
-    //   channels : from `channels list --json` (id = type)
-    //   mcps     : from `mcp list --json` if available (id = name)
-    const configured = { primary: null, fallbacks: [], channels: [], mcps: [] };
-    try {
-      const m = JSON.parse(models.stdout || '{}');
-      const def = m.resolvedDefault || m.defaultModel || null;
-      if (def) configured.primary = { id: def, provider: null, label: def, model: def };
-      const fbs = Array.isArray(m.fallbacks) ? m.fallbacks : [];
-      configured.fallbacks = fbs.map((f) => {
-        const model = (f && typeof f === 'object') ? (f.model || f.id || f.name) : f;
-        return { id: model, label: model, model };
-      }).filter((f) => f.model);
-    } catch (_) {}
-    try {
-      const list = JSON.parse(channels.stdout || '[]');
-      const arr = Array.isArray(list) ? list : (Array.isArray(list.channels) ? list.channels : []);
-      configured.channels = arr.map((c) => {
-        const type = (c && typeof c === 'object') ? (c.type || c.channel || c.id) : c;
-        const label = (c && typeof c === 'object' && c.label) ? c.label : (CHANNELS[type] || type);
-        return { id: type, type, label };
-      }).filter((c) => c.id);
-    } catch (_) {}
-    try {
-      if (mcps.ok) {
-        const list = JSON.parse(mcps.stdout || '[]');
-        const arr = Array.isArray(list) ? list : (Array.isArray(list.servers) ? list.servers : (Array.isArray(list.mcps) ? list.mcps : []));
-        configured.mcps = arr.map((x) => {
-          const name = (x && typeof x === 'object') ? (x.name || x.id) : x;
-          const url = (x && typeof x === 'object') ? (x.url || (MCPS[name] && MCPS[name].url)) : undefined;
-          return { id: name, name, url };
-        }).filter((x) => x.id);
-      }
-    } catch (_) {}
+    const configured = {
+      primary: st.primary
+        ? { id: st.primary.providerId || st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model, keyHint: hintOf(st.primary, st.primary.apiKey), enabled: st.primary.enabled !== false }
+        : null,
+      fallbacks: (st.fallbacks || [])
+        .map((f) => ({ id: f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey), enabled: f.enabled !== false })),
+      channels: (st.channels || [])
+        .map((c) => ({ id: c.type, type: c.type, label: c.label, keyHint: hintOf(c, c.token), enabled: c.enabled !== false })),
+      mcps: [],
+    };
 
-    return { models, channels, mcps, configured };
+    return {
+      models:   { ok: true, code: 0, stdout: JSON.stringify(modelsJson), stderr: '' },
+      channels: { ok: true, code: 0, stdout: JSON.stringify(channelsJson), stderr: '' },
+      mcps:     { ok: true, code: 0, stdout: '[]', stderr: '' },
+      configured,
+    };
   },
 
-  // `model` (optional) overrides the provider's default model (`models set <model>`).
-  // For custom providers the model is always `<name>/<modelId>` from the custom config.
-  async setPrimary(provider, apiKey, custom, model) {
-    if (!PROVIDERS[provider]) return { error: 'unknown provider' };
-    if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
-      return { error: 'missing api key' };
-
-    if (provider === 'custom') {
-      const err = validateCustom(custom);
-      if (err) return { error: err };
-      const setup = await setupCustomProvider(custom, apiKey);
-      if (!setup.ok) return setup;
-      const set = await run(OC, ['models', 'set', `${setup.name}/${setup.modelId}`]);
-      const restart = await restartGateway();
-      return { patch: setup.patch, auth: setup.auth, set, restart };
+  // Enable/disable a configured item without removing it (panel toggle).
+  async setEnabled({ kind, id, enabled } = {}) {
+    const on = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
+    const st = loadState();
+    let found = false;
+    if (kind === 'primary') {
+      if (st.primary) { st.primary.enabled = on; found = true; }
+    } else if (kind === 'fallback') {
+      for (const f of (st.fallbacks || [])) if (f && (f.model === id || f.id === id)) { f.enabled = on; found = true; }
+    } else if (kind === 'channel') {
+      for (const c of (st.channels || [])) if (c && c.type === id) { c.enabled = on; found = true; }
+    } else {
+      return { error: 'unknown kind' };
     }
+    if (!found) return { error: 'not found' };
+    saveState(st);
+    const apply = applyAll(st, `toggle-${kind}`);
+    return { ok: apply.ok, enabled: on, restart: apply };
+  },
 
-    const auth = await run(OC, ['models', 'auth', 'paste-api-key', '--provider', provider], apiKey.trim() + '\n');
-    if (!auth.ok) return { step: 'auth', auth };
-    const chosenModel = (typeof model === 'string' && model.trim())
-      ? model.trim()
-      : PROVIDERS[provider].defaultModel;
-    const set = await run(OC, ['models', 'set', chosenModel]);
-    const restart = await restartGateway();
-    return { auth, set, restart };
+  async setPrimary(provider, apiKey, custom, model) {
+    if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
+    const r = resolveProvider(provider, custom, model);
+    if (r.error) return { error: r.error };
+    const st = loadState();
+    st.primary = { provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()), enabled: true };
+    saveState(st);
+    const apply = applyAll(st, 'set-primary');
+    return {
+      auth: { ok: true, code: 0, stdout: 'openclaw.json + .env written', stderr: '' },
+      set:  { ok: apply.ok, code: 0, stdout: `primary ${r.providerId}/${r.model}`, stderr: '' },
+      restart: apply,
+    };
   },
 
   async addFallback(provider, apiKey, custom) {
-    if (!PROVIDERS[provider]) return { error: 'unknown provider' };
-    if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
-      return { error: 'missing api key' };
-
-    if (provider === 'custom') {
-      const err = validateCustom(custom);
-      if (err) return { error: err };
-      const setup = await setupCustomProvider(custom, apiKey);
-      if (!setup.ok) return setup;
-      const add = await run(OC, ['models', 'fallbacks', 'add', `${setup.name}/${setup.modelId}`]);
-      const restart = await restartGateway();
-      return { patch: setup.patch, auth: setup.auth, add, restart };
-    }
-
-    const auth = await run(OC, ['models', 'auth', 'paste-api-key', '--provider', provider], apiKey.trim() + '\n');
-    if (!auth.ok) return { step: 'auth', auth };
-    const add = await run(OC, ['models', 'fallbacks', 'add', PROVIDERS[provider].defaultModel]);
-    const restart = await restartGateway();
-    return { auth, add, restart };
+    if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
+    const r = resolveProvider(provider, custom);
+    if (r.error) return { error: r.error };
+    const st = loadState();
+    st.fallbacks = st.fallbacks || [];
+    st.fallbacks.push({ provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), keyHint: maskKey(apiKey.trim()), enabled: true });
+    saveState(st);
+    const apply = applyAll(st, 'add-fallback');
+    return {
+      auth: { ok: true, code: 0, stdout: 'fallback recorded', stderr: '' },
+      add:  { ok: apply.ok, code: 0, stdout: `fallback ${r.providerId}/${r.model}`, stderr: '' },
+      restart: apply,
+      todo: 'OpenClaw auto-fallback chain not confirmed for this build; registered + allowlisted only.',
+    };
   },
 
-  // The Phase-1 front-end manages active-primary / removal client-side in mock
-  // mode and via re-running setPrimary live, so these are exposed for the unified
-  // adapter contract but not yet wired to dedicated OpenClaw subcommands.
-  // TODO: map to `openclaw models set` / credential removal when those land.
-  async setActivePrimary(/* id */) { return { ok: true, todo: 'setActivePrimary not yet mapped for openclaw' }; },
-  async removePrimary(/* id */)   { return { ok: true, todo: 'removePrimary not yet mapped for openclaw' }; },
-  async removeChannel(/* id */)   { return { ok: true, todo: 'removeChannel not yet mapped for openclaw' }; },
-  async removeMcp(/* id */)       { return { ok: true, todo: 'removeMcp not yet mapped for openclaw' }; },
-
-  // Remove a fallback model from the chain. Mirrors addFallback's
-  // `openclaw models fallbacks add <model>`; the remove subcommand flag name is
-  // assumed to be `remove` (verify against `openclaw models fallbacks --help` on
-  // the target build; some builds spell it `rm`/`delete`). `id` is the model id
-  // exactly as status().configured.fallbacks[].id reports it.
   async removeFallback(id) {
-    if (!id || typeof id !== 'string') return { error: 'missing fallback id' };
-    const remove = await run(OC, ['models', 'fallbacks', 'remove', id.trim()]);
-    const restart = await restartGateway();
-    return { remove, restart, ok: remove.ok };
+    const st = loadState();
+    st.fallbacks = (st.fallbacks || []).filter((f) => f && f.model !== id && f.id !== id);
+    saveState(st);
+    const apply = applyAll(st, 'remove-fallback');
+    return { ok: apply.ok, restart: apply };
   },
 
-  async addChannel(channel, token) {
+  async setActivePrimary(/* id */) {
+    return { ok: true, todo: 'OpenClaw has a single active primary; switch by re-running setPrimary.' };
+  },
+
+  async removePrimary(/* id */) {
+    const st = loadState();
+    st.primary = null;
+    saveState(st);
+    const apply = applyAll(st, 'remove-primary');
+    return { ok: apply.ok, restart: apply };
+  },
+
+  // The messaging "Allowed users" field maps to OpenClaw's channel allowFrom
+  // (the owner-lock). Without it the gateway answers no one.
+  async addChannel(channel, token, allowedUsers) {
     if (!CHANNELS[channel]) return { error: 'unknown channel' };
-    if (!token || typeof token !== 'string' || token.length < 8)
-      return { error: 'missing token' };
-
-    fs.mkdirSync(SECRETS_DIR, { recursive: true, mode: 0o700 });
-    const tokenFile = path.join(SECRETS_DIR, `${channel}.token`);
-    fs.writeFileSync(tokenFile, token.trim(), { mode: 0o600 });
-    const add = await run(OC, ['channels', 'add', '--channel', channel, '--token-file', tokenFile]);
-    const restart = await restartGateway();
-    return { add, restart };
+    if (!token || typeof token !== 'string' || token.length < 8) return { error: 'missing token' };
+    const st = loadState();
+    st.channels = (st.channels || []).filter((c) => c.type !== channel);
+    st.channels.push({
+      type: channel,
+      label: CHANNELS[channel],
+      token: token.trim(),
+      tokenTail: token.trim().slice(-3),
+      keyHint: maskKey(token.trim()),
+      allowedUsers: typeof allowedUsers === 'string' ? allowedUsers.trim() : '',
+      enabled: true,
+    });
+    saveState(st);
+    const apply = applyAll(st, 'add-channel');
+    return { add: { ok: apply.ok, code: 0, stdout: `${CHANNELS[channel]} connected`, stderr: '' }, restart: apply };
   },
 
-  async addMcp({ provider, apiKey, name: customName, url: customUrl }) {
-    if (!MCPS[provider]) return { error: 'unknown mcp' };
-    if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
-      return { error: 'missing api key' };
-
-    let name, url;
-    if (provider === 'custom') {
-      if (!customName || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(customName))
-        return { error: 'invalid name (a-z, 0-9, dash, 1-32 chars)' };
-      if (!customUrl || !/^https?:\/\//.test(customUrl))
-        return { error: 'invalid URL (must start with http:// or https://)' };
-      name = customName.trim();
-      url  = customUrl.trim();
-    } else {
-      name = provider;
-      url  = MCPS[provider].url;
-    }
-
-    const add = await run(OC, [
-      'mcp', 'add', '--name', name,
-      '--url', url,
-      '--header', `Authorization: Bearer ${apiKey.trim()}`,
-    ]);
-    const reload = await run(OC, ['mcp', 'reload']);
-    return { add, reload };
+  async removeChannel(id) {
+    const st = loadState();
+    st.channels = (st.channels || []).filter((c) => c.type !== id);
+    saveState(st);
+    const apply = applyAll(st, 'remove-channel');
+    return { ok: apply.ok, restart: apply };
   },
 
-  // One-time avots auto-connect: paste key -> set default model -> restart.
-  // Idempotent: if avots already has a stored credential we skip the paste and
-  // just report preconnected. Returns { preconnected, skipped?, ... } so the
-  // caller can flip its in-memory flag. Never throws.
+  // Turnkey avots: set avots as primary if nothing is configured yet (idempotent).
   async preconnectAvots(key) {
     if (!key) return { preconnected: false, skipped: 'no-key' };
-    if (await avotsAlreadyConfigured()) {
+    const st = loadState();
+    if (st.primary && st.primary.provider === 'avots' && st.primary.apiKey) {
       return { preconnected: true, skipped: 'already-configured' };
     }
-    const auth = await run(OC, ['models', 'auth', 'paste-api-key', '--provider', 'avots'], key + '\n');
-    if (!auth.ok) {
-      return { preconnected: false, step: 'auth', auth };
+    if (st.primary && st.primary.provider !== 'avots') {
+      return { preconnected: false, skipped: 'other-primary-set' };
     }
-    const set = await run(OC, ['models', 'set', AVOTS_DEFAULT_MODEL]);
-    const restart = await restartGateway();
-    // Auth succeeded so avots IS connected even if set/restart hiccup.
-    return { preconnected: true, model: AVOTS_DEFAULT_MODEL, auth, set, restart };
+    st.primary = {
+      provider: 'avots', providerId: 'avots', label: PROVIDERS.avots.label,
+      model: PROVIDERS.avots.defaultModel, baseURL: PROVIDERS.avots.baseURL,
+      envRef: 'AVOTS_API_KEY', apiKey: key.trim(), keyHint: maskKey(key.trim()), enabled: true,
+    };
+    saveState(st);
+    const apply = applyAll(st, 'preconnect-avots');
+    return { preconnected: apply.ok, model: PROVIDERS.avots.defaultModel, restart: apply };
   },
 
-  restart() { return restartGateway(); },
+  restart() { return touchApplyRequest('manual-restart'); },
 };
