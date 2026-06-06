@@ -1041,13 +1041,24 @@
     const ZAP = '⚡';
     let PRICING = {};        // id -> price record
     let PRICING_USD_PER_1000 = null;
+    // The Avots model list, fetched ONLINE from /api/pricing (avots serves it live)
+    // so new/changed models — including FREE ones — show up automatically and prices
+    // stay current. null until loaded; renderPrimaryModelOptions falls back to the
+    // hardcoded PRIMARY_MODELS.avots when offline.
+    let AVOTS_MODELS_ONLINE = null;
 
     function priceFor(id) { return (id && PRICING[id]) || null; }
+    // Free = the API's free flag, or zero in AND out per-token cost (robust against a
+    // cheap PAID model that merely rounds to ~0⚡/msg).
+    function isFreeRec(p) { return !!(p && (p.free === true || (p.input_per_1m_tokens === 0 && p.output_per_1m_tokens === 0))); }
+    function isFreeModel(id) { return isFreeRec(priceFor(id)); }
 
-    // Short price suffix for an <option> label, e.g. " · ~27⚡/msg".
+    // Short price suffix for an <option> label, e.g. " · ~27⚡/msg" (or " · FREE").
     function priceSuffix(id) {
       const p = priceFor(id);
-      if (!p || p.per_message_est == null) return '';
+      if (!p) return '';
+      if (isFreeRec(p)) return ' · FREE';
+      if (p.per_message_est == null) return '';
       return ` · ~${p.per_message_est}${ZAP}/msg`;
     }
 
@@ -1055,14 +1066,15 @@
       try {
         const r = await fetch('/api/pricing').then(x => x.json());
         const data = Array.isArray(r && r.data) ? r.data : [];
-        const map = {};
-        data.forEach(rec => { if (rec && rec.id) map[rec.id] = rec; });
+        const map = {}; const ids = [];
+        data.forEach(rec => { if (rec && rec.id) { map[rec.id] = rec; ids.push(rec.id); } });
         PRICING = map;
+        AVOTS_MODELS_ONLINE = ids.length ? ids : null;   // live model list from avots
         if (typeof r.usd_per_1000_zaps === 'number') PRICING_USD_PER_1000 = r.usd_per_1000_zaps;
       } catch (_) {
-        PRICING = {};  // degrade: plain model ids
+        PRICING = {}; AVOTS_MODELS_ONLINE = null;  // degrade: hardcoded list, plain ids
       }
-      // Re-annotate if the Avots picker is currently showing.
+      // Re-render if the Avots picker is currently showing (list + prices may have changed).
       if (selectedPrimary === 'avots') { renderPrimaryModelOptions('avots'); syncAvotsPriceHint(); }
     }
 
@@ -1079,21 +1091,33 @@
       const sel = $('primaryModel');
       const free = $('primaryModelCustom');
       if (!area || !sel || !free) return;
-      const list = PRIMARY_MODELS[provider];
+      const annotate = provider === 'avots';
+      // Avots: prefer the LIVE model list from /api/pricing (so new + FREE models
+      // appear automatically); fall back to the hardcoded curated list offline.
+      let list = PRIMARY_MODELS[provider];
+      if (annotate && Array.isArray(AVOTS_MODELS_ONLINE) && AVOTS_MODELS_ONLINE.length) {
+        list = AVOTS_MODELS_ONLINE;
+      }
       if (!list) { area.hidden = true; sel.innerHTML = ''; free.hidden = true; free.value = ''; return; }
       const prev = sel.value && sel.value !== CUSTOM_MODEL_VALUE ? sel.value : null;
       area.hidden = false;
       free.hidden = true; free.value = '';
-      const annotate = provider === 'avots';
-      // The curated default (first entry) stays the pre-selected model regardless
-      // of display order.
-      const defaultModel = list[0];
-      // Avots: order options by per-message price, most expensive first (models
-      // without a known price sort last). Others keep the curated order.
+      // Keep the recommended quality default pre-selected even when the list is the
+      // live one and even though FREE models are shown first.
+      let defaultModel = list[0];
+      if (annotate) {
+        const want = 'anthropic/claude-opus-4.8';
+        defaultModel = list.includes(want) ? want
+          : (list.includes(PRIMARY_MODELS.avots[0]) ? PRIMARY_MODELS.avots[0] : list[0]);
+      }
+      // Avots order: FREE models first (the attractive, hard-to-miss option), then
+      // paid models most-expensive-first. Others keep the curated order.
       let ordered = list;
       if (annotate) {
         const est = (id) => { const p = priceFor(id); return (p && p.per_message_est != null) ? p.per_message_est : -Infinity; };
-        ordered = list.slice().sort((a, b) => est(b) - est(a));
+        const frees = list.filter(isFreeModel);
+        const paid = list.filter((id) => !isFreeModel(id)).sort((a, b) => est(b) - est(a));
+        ordered = frees.concat(paid);
       }
       sel.innerHTML =
         ordered.map(m => `<option value="${esc(m)}">${esc(m + (annotate ? priceSuffix(m) : ''))}</option>`).join('') +
@@ -1115,7 +1139,9 @@
       if (!p) { el.innerHTML = ''; return; }
       const bits = [];
       if (p.use) bits.push(esc(p.use));
-      if (p.per_message_est != null) {
+      if (isFreeRec(p)) {
+        bits.push('<b>FREE</b>');
+      } else if (p.per_message_est != null) {
         const usd = (PRICING_USD_PER_1000 != null)
           ? ` (~$${((p.per_message_est * PRICING_USD_PER_1000) / 1000).toFixed(3)})`
           : ` (~$${(p.per_message_est / 1000).toFixed(3)})`;
