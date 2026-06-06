@@ -311,6 +311,23 @@ app.post('/api/toggle', async (req, res) => {
   }
 });
 
+// === restart the agent =====================================================
+// Bounce the agent (gateway) when it gets stuck (provider hiccup, Telegram
+// flood-control backoff, etc.). The adapter touches .apply-request; the host
+// applier restarts the agent container. Agent products only (builders have no
+// restart). Behind the auth gate like everything else.
+app.post('/api/restart', async (_req, res) => {
+  if (typeof adapter.restart !== 'function') {
+    return res.status(404).json({ error: `restart is not available for product '${PRODUCT}'` });
+  }
+  try {
+    const r = await adapter.restart();
+    res.json({ ok: !(r && r.ok === false), ...(r && typeof r === 'object' ? r : {}) });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
 // === pairing (native approval queue) =======================================
 // Users who message the agent but aren't approved show up in status().pairing
 // .pending (read straight from the data dir). Approving one delegates to the

@@ -409,6 +409,19 @@
     button.logout:hover:not(:disabled) {
       background: #fef2f2; color: var(--err); border-color: var(--err);
     }
+    .topbar-actions { display: inline-flex; align-items: center; gap: 10px; }
+    button.restart {
+      width: auto; margin: 0; padding: 9px 18px;
+      background: var(--card); color: var(--txt);
+      border: 1px solid var(--line); border-radius: 9px;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+      transition: background .15s, color .15s, border-color .15s;
+    }
+    button.restart:hover:not(:disabled) {
+      background: var(--brand-soft); color: var(--brand-hover); border-color: var(--brand-line);
+    }
+    button.restart:disabled { opacity: .6; cursor: default; }
 
     .toggle {
       position: relative; display: inline-block;
@@ -486,7 +499,11 @@
 <body>
   <header class="topbar">
     <span class="brand"><span class="logo" aria-hidden="true">✦</span> <span data-i18n="brandLabel">AI Control Panel</span></span>
-    <button id="logoutBtn" class="logout" type="button" data-i18n="settingsSignOut">Sign out</button>
+    <div class="topbar-actions">
+      <!-- Restart the agent (gateway). Shown only for agent products; hidden for builders. -->
+      <button id="restartBtn" class="restart" type="button" hidden data-i18n="restartBtn">Restart</button>
+      <button id="logoutBtn" class="logout" type="button" data-i18n="settingsSignOut">Sign out</button>
+    </div>
   </header>
   <div class="wrap">
     <div class="hero">
@@ -713,6 +730,9 @@
         mcpReuseAvots: 'Uses your connected Avots key - no need to paste it again. Just click Add MCP.',
         mcpKeyOptional: 'Optional - leave blank to reuse your Avots key',
         settingsSignOut: 'Sign out',
+        restartBtn: 'Restart', restarting: 'Restarting…', restartDone: 'Restarting ✓',
+        restartConfirm: 'Restart the assistant now? It will be unavailable for a few seconds.',
+        restartErr: 'Could not restart',
         cfgSavedAi: 'Saved AI providers', cfgActivePrimary: 'Active primary', cfgSetAsPrimary: 'Set as primary',
         cfgSavedFallbacks: 'Saved fallbacks', cfgSavedFallback: 'Saved fallback',
         cfgEnabledChain: 'Enabled (in chain)', cfgDisabledChain: 'Disabled (saved but skipped)',
@@ -1263,6 +1283,7 @@
         setHidden('ai-card', true);
         setHidden('messaging-card', true);
         setHidden('mcp-card', true);
+        setHidden('restartBtn', true);   // builders run their own product; nothing for us to restart
 
         $('builderReadyTitle').textContent = `Your ${productLabel} is ready`;
         $('builderReadyText').textContent =
@@ -1302,6 +1323,7 @@
       setHidden('fallback-section', !cap.fallback);
       setHidden('messaging-card', !cap.messaging);
       setHidden('mcp-card', !cap.mcp);
+      setHidden('restartBtn', false);  // agent products can be restarted from here
     }
 
     // Trash icon for the remove buttons (matches the button.remove styling in CSS).
@@ -1716,6 +1738,25 @@
     $('logoutBtn').addEventListener('click', async () => {
       try { await fetch('/logout', { method: 'POST' }); } catch(_) {}
       window.location = '/login';
+    });
+
+    // Restart the agent (gateway). Useful if the bot gets stuck (e.g. a provider
+    // hiccup or Telegram flood-control backoff). POSTs /api/restart, which asks the
+    // host applier to bounce the agent container; takes a few seconds.
+    $('restartBtn').addEventListener('click', async () => {
+      const btn = $('restartBtn');
+      if (!confirm(T('restartConfirm'))) return;
+      const prev = btn.textContent;
+      btn.disabled = true; btn.textContent = T('restarting');
+      let r;
+      try { r = await post('/api/restart', {}); } catch (_) { r = { error: 'network' }; }
+      if (r && r.ok !== false && !r.error) {
+        btn.textContent = T('restartDone');
+        setTimeout(() => { btn.disabled = false; btn.textContent = prev; loadStatus(); }, 6000);
+      } else {
+        btn.disabled = false; btn.textContent = prev;
+        alert(T('restartErr') + (r && r.error ? (': ' + r.error) : ''));
+      }
     });
 
     // OAuth return handling: /oauth/avots/callback redirects back here with
