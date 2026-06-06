@@ -25,9 +25,13 @@
  * Env: OPENCLAW_DATA_DIR | OPENCLAW_CONFIG_DIR — the shared dir as the panel sees
  * it (the compose mounts the host ~/.openclaw here; default /data).
  *
- * OpenClaw access model is OWNER-LOCK, not pairing: a channel only answers the ids
- * in channels.<type>.allowFrom. So there is NO "Access requests" queue (pairing
- * capability is off); the messaging "Allowed users" field maps to allowFrom.
+ * OpenClaw access model is OWNER-LOCK: a channel only answers the ids in
+ * channels.<type>.allowFrom. The messaging "Allowed users" field maps directly to
+ * allowFrom. ON TOP of that we also expose an "Access requests" queue (pairing
+ * capability ON): OpenClaw records people who message the bot but aren't allowed
+ * yet under <data>/credentials/<channel>-pairing.json; the panel lists them and
+ * Approve appends their id to that channel's allowFrom (persisted in
+ * state.approved[platform] so it survives config rewrites), then re-applies.
  */
 const fs = require('fs');
 const path = require('path');
@@ -37,6 +41,16 @@ const CONFIG_FILE = path.join(CONFIG_DIR, 'openclaw.json');
 const ENV_FILE = path.join(CONFIG_DIR, '.env');
 const APPLY_REQUEST = path.join(CONFIG_DIR, '.apply-request');
 const STATE_FILE = path.join(CONFIG_DIR, 'panel-state.json');
+
+// OpenClaw persists pending pairing requests (people who messaged the bot but
+// aren't in allowFrom yet) under <data>/credentials/<channel>-pairing.json. We
+// read them so the panel can show an "Access requests" queue and Approve =
+// append the user's id to that channel's allowFrom (the owner-lock). The exact
+// JSON shape varies by build, so listPairing() below is intentionally tolerant.
+const PAIRING_DIR = path.join(CONFIG_DIR, 'credentials');
+const PAIRING_FILE_RE = /^([a-z_][a-z0-9_]{1,30})-pairing\.json$/;
+const PAIRING_PLATFORM_RE = /^[a-z_]{2,20}$/;
+const PAIRING_USERID_RE = /^[A-Za-z0-9._:@-]{1,64}$/;
 
 const DEFAULT_CONTEXT_WINDOW = 200000;
 const DEFAULT_MAX_TOKENS = 32000;
@@ -215,8 +229,11 @@ function writeConfig(state) {
     channels: {},
   };
 
+  const approved = (state.approved && typeof state.approved === 'object') ? state.approved : {};
   for (const c of (state.channels || []).filter((x) => x && x.enabled !== false)) {
-    const ids = String(c.allowedUsers || '').split(',').map((s) => s.trim()).filter(Boolean);
+    // allowFrom = the user-typed "Allowed users" csv  +  anyone Approved from the
+    // Access-requests queue (state.approved[type]), de-duped.
+    const ids = mergeAllowed(c.allowedUsers, approved[c.type]);
     cfg.channels[c.type] = {
       enabled: true,
       botToken: '${' + channelTokenEnv(c.type) + '}',
@@ -246,6 +263,99 @@ function applyAll(state, reason) {
   return touchApplyRequest(reason);
 }
 
+// === pairing (Access requests) =============================================
+// Merge a comma-separated "Allowed users" string with an array of approved ids,
+// trimmed + de-duped, into the ARRAY form OpenClaw's channels.<type>.allowFrom
+// expects. (Hermes' mergeAllowed returns a csv; OpenClaw wants an array.)
+function mergeAllowed(csv, extra) {
+  const set = new Set();
+  for (const x of String(csv || '').split(',')) { const v = x.trim(); if (v) set.add(v); }
+  for (const x of (Array.isArray(extra) ? extra : [])) { const v = String(x).trim(); if (v) set.add(v); }
+  return [...set];
+}
+
+// Pull a user id / name / code / timestamp out of one pairing entry, tolerating
+// the several shapes OpenClaw builds use (flat, nested `from`/`user`, telegram
+// update style). `key` is the entry's object key (often the pairing code or id).
+function normalizePairingEntry(entry, key) {
+  if (!entry || typeof entry !== 'object') {
+    // value might itself be a bare id/name (object keyed by code -> id)
+    const v = entry == null ? '' : String(entry);
+    return { userId: /^[0-9]+$/.test(v) ? v : '', userName: /^[0-9]+$/.test(v) ? '' : v, code: key || '', createdAt: 0 };
+  }
+  const from = (entry.from && typeof entry.from === 'object') ? entry.from
+            : (entry.user && typeof entry.user === 'object') ? entry.user : {};
+  const pick = (...vals) => { for (const v of vals) if (v != null && v !== '') return v; return undefined; };
+  const rawId = pick(entry.user_id, entry.userId, entry.id, entry.tg_id, entry.chat_id, entry.chatId, from.id, from.user_id);
+  const rawName = pick(entry.user_name, entry.userName, entry.username, entry.name, entry.display_name,
+                       from.username, from.first_name, from.name);
+  const rawCode = pick(entry.code, entry.pair_code, entry.pairing_code,
+                       entry.hash ? String(entry.hash).slice(0, 8) : undefined, key);
+  let ts = pick(entry.created_at, entry.createdAt, entry.ts, entry.timestamp, entry.time, entry.first_seen, 0);
+  if (typeof ts === 'string') { const n = Date.parse(ts); ts = Number.isNaN(n) ? 0 : n; }
+  // numeric key fallback for id when nothing else gave one
+  let userId = rawId != null ? String(rawId) : '';
+  if (!userId && key && /^[0-9]{3,}$/.test(String(key))) userId = String(key);
+  return { userId, userName: rawName != null ? String(rawName) : '', code: rawCode != null ? String(rawCode) : '', createdAt: Number(ts) || 0 };
+}
+
+// Read every <data>/credentials/<platform>-pairing.json and flatten to one row
+// per waiting user the UI can render. Tolerant of array / object-of-entries /
+// {pending:[...]} / {requests:[...]} shapes.
+function listPairing() {
+  let files;
+  try { files = fs.readdirSync(PAIRING_DIR); } catch (_) { return []; }
+  const out = [];
+  for (const f of files) {
+    const m = PAIRING_FILE_RE.exec(f);
+    if (!m) continue;
+    const platform = m[1];
+    let data;
+    try { data = JSON.parse(fs.readFileSync(path.join(PAIRING_DIR, f), 'utf8')); } catch (_) { continue; }
+    if (!data) continue;
+    let entries = [];
+    if (Array.isArray(data)) entries = data.map((e) => [null, e]);
+    else if (Array.isArray(data.pending)) entries = data.pending.map((e) => [null, e]);
+    else if (Array.isArray(data.requests)) entries = data.requests.map((e) => [null, e]);
+    else if (typeof data === 'object') entries = Object.entries(data);
+    for (const [key, entry] of entries) {
+      const n = normalizePairingEntry(entry, key);
+      if (!n.userId && !n.userName && !n.code) continue;   // nothing actionable
+      out.push({ platform, ...n });
+    }
+  }
+  // collapse to one row per user (or per code when no id), newest first.
+  const byUser = new Map();
+  for (const item of out) {
+    const key = item.userId ? `${item.platform}:${item.userId}` : `${item.platform}:#${item.code}`;
+    const prev = byUser.get(key);
+    if (!prev || (item.createdAt || 0) > (prev.createdAt || 0)) byUser.set(key, item);
+  }
+  return [...byUser.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+}
+
+// Best-effort: drop a user's pending entries from <platform>-pairing.json so the
+// Access-requests card clears after Approve. The gateway owns this file but
+// re-reads it on the restart that Approve triggers.
+function prunePending(platform, userId) {
+  const file = path.join(PAIRING_DIR, `${platform}-pairing.json`);
+  let data;
+  try { data = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (_) { return; }
+  const uid = String(userId);
+  const matches = (entry, key) => normalizePairingEntry(entry, key).userId === uid;
+  let changed = false;
+  if (Array.isArray(data)) {
+    const kept = data.filter((e) => !matches(e, null));
+    if (kept.length !== data.length) { data = kept; changed = true; }
+  } else if (data && Array.isArray(data.pending)) {
+    const kept = data.pending.filter((e) => !matches(e, null));
+    if (kept.length !== data.pending.length) { data.pending = kept; changed = true; }
+  } else if (data && typeof data === 'object') {
+    for (const [k, e] of Object.entries(data)) if (matches(e, k)) { delete data[k]; changed = true; }
+  }
+  if (changed) { try { fs.writeFileSync(file, JSON.stringify(data, null, 2), { mode: 0o600 }); } catch (_) {} }
+}
+
 module.exports = {
   id: 'openclaw',
   label: 'OpenClaw',
@@ -255,7 +365,7 @@ module.exports = {
     fallback: true,    // recorded + allowlisted; auto-fallback chain TODO (verify on live VM)
     messaging: true,
     mcp: false,        // OpenClaw MCP config schema unverified; off until live-checked
-    pairing: false,    // OpenClaw uses channel allowFrom (owner-lock), not a pairing queue
+    pairing: true,     // Access requests: read <data>/credentials/<ch>-pairing.json, Approve -> allowFrom
     openProduct: false,
     preconnect: true,
   },
@@ -292,7 +402,55 @@ module.exports = {
       channels: { ok: true, code: 0, stdout: JSON.stringify(channelsJson), stderr: '' },
       mcps:     { ok: true, code: 0, stdout: '[]', stderr: '' },
       configured,
+      // Access-requests queue: people who messaged the bot but aren't in allowFrom
+      // yet. The shared UI renders these as "Access requests" with Approve.
+      pairing: { pending: listPairing() },
     };
+  },
+
+  // List pending pairing requests (also surfaced inside status().pairing).
+  listPairing() { return listPairing(); },
+
+  // Approve a waiting user by id: append the id to state.approved[platform] (so it
+  // survives config rewrites), prune the pending entry, and re-apply. writeConfig
+  // merges state.approved[type] into channels.<type>.allowFrom, so the gateway
+  // admits that user after the applier restarts it. Requires that channel to exist
+  // (the bot token must already be connected for there to be a channel to join).
+  async approvePairing({ platform, userId } = {}) {
+    if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
+    const uid = String(userId == null ? '' : userId).trim();
+    if (!PAIRING_USERID_RE.test(uid)) return { error: 'invalid user id' };
+    const st = loadState();
+    if (!(st.channels || []).some((c) => c.type === platform)) {
+      return { error: `connect the ${platform} bot first (no channel to grant access to)` };
+    }
+    st.approved = (st.approved && typeof st.approved === 'object') ? st.approved : {};
+    st.approved[platform] = Array.isArray(st.approved[platform]) ? st.approved[platform] : [];
+    if (!st.approved[platform].includes(uid)) st.approved[platform].push(uid);
+    prunePending(platform, uid);
+    saveState(st);
+    const apply = applyAll(st, 'approve-user');
+    return { ok: apply.ok, queued: true, restart: apply };
+  },
+
+  // Revoke access: drop the id from state.approved AND from the channel's typed
+  // "Allowed users" csv, then re-apply (so allowFrom no longer contains it).
+  async revokePairing({ platform, userId } = {}) {
+    if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
+    const uid = String(userId == null ? '' : userId).trim();
+    if (!PAIRING_USERID_RE.test(uid)) return { error: 'invalid user id' };
+    const st = loadState();
+    if (st.approved && Array.isArray(st.approved[platform])) {
+      st.approved[platform] = st.approved[platform].filter((x) => String(x) !== uid);
+    }
+    for (const c of (st.channels || [])) {
+      if (c.type === platform && typeof c.allowedUsers === 'string') {
+        c.allowedUsers = c.allowedUsers.split(',').map((s) => s.trim()).filter((s) => s && s !== uid).join(',');
+      }
+    }
+    saveState(st);
+    const apply = applyAll(st, 'revoke-user');
+    return { ok: apply.ok, restart: apply };
   },
 
   // Enable/disable a configured item without removing it (panel toggle).
