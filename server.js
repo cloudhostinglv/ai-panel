@@ -289,6 +289,28 @@ app.post('/api/mcp/remove', requireCap('mcp'), async (req, res) => {
   }
 });
 
+// === enable/disable toggle =================================================
+// Flip a configured item on/off without removing it. Body: {kind,id,enabled}.
+// kind maps to the section capability so a builder/agent can't toggle a section
+// it doesn't have. Delegates to adapter.setEnabled; the UI re-runs loadStatus().
+app.post('/api/toggle', async (req, res) => {
+  const kind = (req.body && req.body.kind) || '';
+  const capByKind = { primary: 'primary', fallback: 'fallback', channel: 'messaging', mcp: 'mcp' };
+  const cap = capByKind[kind];
+  if (!cap) return res.status(400).json({ error: `unknown kind '${kind}'` });
+  if (!CAP[cap]) return res.status(404).json({ error: `'${kind}' is not available for product '${PRODUCT}'` });
+  if (typeof adapter.setEnabled !== 'function') {
+    return res.status(404).json({ error: `toggle is not available for product '${PRODUCT}'` });
+  }
+  try {
+    const r = await adapter.setEnabled(req.body || {});
+    if (r && r.error) return res.status(400).json(r);
+    res.json(r);
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
 // === pairing (native approval queue) =======================================
 // Users who message the agent but aren't approved show up in status().pairing
 // .pending (read straight from the data dir). Approving one delegates to the

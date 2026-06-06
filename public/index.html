@@ -362,6 +362,24 @@
     .configured .item button.approve:active:not(:disabled) { transform: translateY(1px); }
     .configured .item button.approve:disabled { opacity: .55; cursor: default; }
 
+    /* On/off switch in the connected lists (enable/disable without removing). */
+    .configured .item button.toggle {
+      width: 38px; height: 22px; padding: 0; margin: 0; flex-shrink: 0;
+      border-radius: 999px; border: 1px solid var(--line);
+      background: #d1d5db; position: relative; cursor: pointer;
+      transition: background .15s; -webkit-appearance: none; appearance: none;
+    }
+    .configured .item button.toggle.on { background: #16a34a; border-color: transparent; }
+    .configured .item button.toggle .knob {
+      position: absolute; top: 2px; left: 2px; width: 16px; height: 16px;
+      border-radius: 50%; background: #fff; transition: left .15s;
+      box-shadow: 0 1px 2px rgba(0,0,0,.25);
+    }
+    .configured .item button.toggle.on .knob { left: 18px; }
+    .configured .item button.toggle:disabled { opacity: .6; cursor: default; }
+    /* Dim a disabled row's text (the controls stay fully visible). */
+    .configured .item.off .meta { opacity: .45; }
+
     .configured .item .actions {
       display: flex; align-items: center; gap: 10px; flex-shrink: 0;
     }
@@ -692,6 +710,8 @@
         mcpChoose: 'Choose MCP', mcpCustomNote: 'For any MCP server reachable over HTTPS with a Bearer token.',
         mcpCustomNamePh: 'e.g. my-github-mcp', mcpUrl: 'URL',
         mcpApiKey: 'API key / Bearer token', mcpApiKeyPh: 'Paste the MCP key', mcpSave: 'Add MCP',
+        mcpReuseAvots: 'Uses your connected Avots key - no need to paste it again. Just click Add MCP.',
+        mcpKeyOptional: 'Optional - leave blank to reuse your Avots key',
         settingsSignOut: 'Sign out',
         cfgSavedAi: 'Saved AI providers', cfgActivePrimary: 'Active primary', cfgSetAsPrimary: 'Set as primary',
         cfgSavedFallbacks: 'Saved fallbacks', cfgSavedFallback: 'Saved fallback',
@@ -702,6 +722,7 @@
         cfgEnabledMcp: 'Enabled', cfgDisabledMcp: 'Disabled (saved but inactive)',
         cfgActive: 'active', cfgOff: 'off',
         moveUp: 'Move up', moveDown: 'Move down', remove: 'Remove',
+        enable: 'Enable', disable: 'Disable',
         keyHintTitle: 'Key fingerprint (start…end) - to tell keys apart; not the full key',
         pairingTitle: 'Access requests',
         pairingHint: 'People who messaged your bot and are waiting for access. Approve to let them in - they can then use the assistant on any model.',
@@ -984,6 +1005,9 @@
     // The provider id of the currently-selected primary card (null until the
     // user picks one). Read by the save handler instead of an old <select>.
     let selectedPrimary = null;
+    // Provider id of the configured primary AI (e.g. 'avots'), refreshed by
+    // loadStatus(). Used so the Avots MCP can reuse the primary's avots key.
+    let primaryProvider = null;
     const checkSvg = '<svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>';
 
     function renderPrimaryCards() {
@@ -1261,7 +1285,7 @@
     // an array of { id, label, detail }. The container is hidden when the list is
     // empty, otherwise shows a small title + one .item row per entry, each with a
     // trash button that calls onRemove(id) (which POSTs then re-runs loadStatus).
-    function renderConfiguredList(containerId, title, items, removeUrl) {
+    function renderConfiguredList(containerId, title, items, removeUrl, kind) {
       const el = $(containerId); if (!el) return;
       const list = Array.isArray(items) ? items.filter(Boolean) : [];
       if (!list.length) { el.hidden = true; el.innerHTML = ''; return; }
@@ -1273,10 +1297,20 @@
           // Masked key fingerprint (start…end) so two entries with different keys
           // are tellable apart. Only shown when the adapter provides one.
           const hint = it.keyHint ? ` <code class="keyhint" title="${esc(T('keyHintTitle'))}">${esc(it.keyHint)}</code>` : '';
-          return `<div class="item">` +
+          const on = it.enabled !== false;
+          // On/off switch (when a kind is given). Disabled rows are dimmed.
+          const toggle = kind
+            ? `<button class="toggle ${on ? 'on' : 'off'}" type="button" role="switch" aria-checked="${on}" ` +
+                `title="${esc(on ? T('disable') : T('enable'))}" aria-label="${esc(on ? T('disable') : T('enable'))}" ` +
+                `data-toggle-kind="${esc(kind)}" data-toggle-id="${esc(it.id)}" data-toggle-on="${on ? '1' : '0'}">` +
+                `<span class="knob"></span></button>`
+            : '';
+          return `<div class="item${on ? '' : ' off'}">` +
             `<div class="meta"><span class="label">${esc(it.label)}${hint}</span>${detail}</div>` +
-            `<button class="remove" type="button" title="${esc(T('remove'))}" aria-label="${esc(T('remove'))}" ` +
-              `data-remove-url="${esc(removeUrl)}" data-remove-id="${esc(it.id)}">${trashSvg}</button>` +
+            `<div class="actions">${toggle}` +
+              `<button class="remove" type="button" title="${esc(T('remove'))}" aria-label="${esc(T('remove'))}" ` +
+                `data-remove-url="${esc(removeUrl)}" data-remove-id="${esc(it.id)}">${trashSvg}</button>` +
+            `</div>` +
           `</div>`;
         }).join('');
     }
@@ -1288,31 +1322,31 @@
       cfg = cfg || {};
       // Primary AI (single row or hidden).
       const primary = (cap.primary !== false && cfg.primary)
-        ? [{ id: cfg.primary.id, label: cfg.primary.label || cfg.primary.model || 'Primary AI', detail: cfg.primary.model || '', keyHint: cfg.primary.keyHint }]
+        ? [{ id: cfg.primary.id, label: cfg.primary.label || cfg.primary.model || 'Primary AI', detail: cfg.primary.model || '', keyHint: cfg.primary.keyHint, enabled: cfg.primary.enabled }]
         : [];
-      renderConfiguredList('primaryConfigured', T('cfgActivePrimary'), primary, '/api/primary/remove');
+      renderConfiguredList('primaryConfigured', T('cfgActivePrimary'), primary, '/api/primary/remove', 'primary');
 
       // Fallback AI list.
       const fallbacks = (cap.fallback !== false && Array.isArray(cfg.fallbacks))
-        ? cfg.fallbacks.map((f) => ({ id: f.id, label: f.label || f.model, detail: f.model || '', keyHint: f.keyHint }))
+        ? cfg.fallbacks.map((f) => ({ id: f.id, label: f.label || f.model, detail: f.model || '', keyHint: f.keyHint, enabled: f.enabled }))
         : [];
-      renderConfiguredList('fallbacksConfigured', T('cfgSavedFallbacks'), fallbacks, '/api/fallback/remove');
+      renderConfiguredList('fallbacksConfigured', T('cfgSavedFallbacks'), fallbacks, '/api/fallback/remove', 'fallback');
 
       // Messaging channels.
       const channels = (cap.messaging !== false && Array.isArray(cfg.channels))
-        ? cfg.channels.map((c) => ({ id: c.id, label: c.label || c.type, detail: '', keyHint: c.keyHint }))
+        ? cfg.channels.map((c) => ({ id: c.id, label: c.label || c.type, detail: '', keyHint: c.keyHint, enabled: c.enabled }))
         : [];
-      renderConfiguredList('channelsConfigured', T('cfgConnectedChannels'), channels, '/api/channel/remove');
+      renderConfiguredList('channelsConfigured', T('cfgConnectedChannels'), channels, '/api/channel/remove', 'channel');
 
       // MCP add-ons. Detail = the host part of the url (falls back to the url).
       const mcps = (cap.mcp !== false && Array.isArray(cfg.mcps))
         ? cfg.mcps.map((m) => {
             let host = '';
             try { host = m.url ? new URL(m.url).host : ''; } catch (_) { host = m.url || ''; }
-            return { id: m.id, label: m.name || m.id, detail: host, keyHint: m.keyHint };
+            return { id: m.id, label: m.name || m.id, detail: host, keyHint: m.keyHint, enabled: m.enabled };
           })
         : [];
-      renderConfiguredList('mcpConfigured', T('cfgConnectedMcps'), mcps, '/api/mcp/remove');
+      renderConfiguredList('mcpConfigured', T('cfgConnectedMcps'), mcps, '/api/mcp/remove', 'mcp');
     }
 
     // Render the native "Access requests" queue (pending pairings). Each row is a
@@ -1347,6 +1381,19 @@
       if (!url) return;
       btn.disabled = true;
       try { await post(url, { id }); } catch (_) {}
+      await loadStatus();
+    });
+
+    // Delegated handler for the on/off switches in the connected lists. Flips the
+    // item's enabled flag via /api/toggle, then refreshes (the row re-renders in
+    // its new state, and the gateway is re-applied by the adapter).
+    document.addEventListener('click', async (e) => {
+      const btn = e.target.closest('button.toggle'); if (!btn) return;
+      const kind = btn.dataset.toggleKind, id = btn.dataset.toggleId;
+      const currentlyOn = btn.dataset.toggleOn === '1';
+      if (!kind) return;
+      btn.disabled = true;
+      try { await post('/api/toggle', { kind, id, enabled: !currentlyOn }); } catch (_) {}
       await loadStatus();
     });
 
@@ -1387,6 +1434,11 @@
         // Render the per-section "what's connected" lists (with remove buttons)
         // from the adapter's structured `configured` view.
         renderConfigured(s.configured, cap);
+
+        // Track the configured primary provider so the Avots MCP can offer
+        // "reuse my Avots key" (no second key needed). Refresh the MCP hint.
+        primaryProvider = (s.configured && s.configured.primary && s.configured.primary.provider) || null;
+        try { syncMcpHint(); } catch (_) {}
 
         // Native pairing approval queue (people waiting for bot access).
         renderPairing(s.pairing, cap);
@@ -1566,9 +1618,22 @@
       busy(b,false); if (ok) { $('token').value=''; loadStatus(); }
     };
 
+    // True when the user is adding the Avots MCP and the primary AI is already
+    // Avots — then the same av_mcp_ key works for both, so no second key needed.
+    function mcpAvotsReuse() {
+      return $('mcpProvider') && $('mcpProvider').value === 'avots' && primaryProvider === 'avots';
+    }
+
     function syncMcpHint() {
       const el = $('mcpHint'); if (!el) return;
-      el.innerHTML = MCP_HINTS[$('mcpProvider').value] || '';
+      const keyInput = $('mcpKey');
+      if (mcpAvotsReuse()) {
+        el.innerHTML = '<span style="color:#16a34a">' + esc(T('mcpReuseAvots')) + '</span>';
+        if (keyInput) keyInput.placeholder = T('mcpKeyOptional');
+      } else {
+        el.innerHTML = MCP_HINTS[$('mcpProvider').value] || '';
+        if (keyInput) keyInput.placeholder = 'Paste the MCP key';
+      }
     }
 
     // Populate the MCP dropdown once at boot from LOCAL_MCPS (Avots.ai first,
@@ -1602,7 +1667,9 @@
         name = meta.label; url = meta.url || '';
       }
 
-      if (!apiKey) { show($('mcpMsg'), false, 'Error: API key required'); busy(b, false); return; }
+      // Avots MCP + Avots primary => reuse the primary key, so a blank key is OK
+      // (the adapter fills it in). Every other case still requires a key.
+      if (!apiKey && !mcpAvotsReuse()) { show($('mcpMsg'), false, 'Error: API key required'); busy(b, false); return; }
       if (provider === 'custom') {
         if (!name || !url) { show($('mcpMsg'), false, 'Error: fill in name and URL'); busy(b, false); return; }
         if (!/^https?:\/\//.test(url)) { show($('mcpMsg'), false, 'Error: URL must start with http:// or https://'); busy(b, false); return; }

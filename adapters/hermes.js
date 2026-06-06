@@ -240,14 +240,22 @@ function touchApplyRequest(reason) {
 // This is the single funnel every mutation goes through.
 function applyAll(state, reason) {
   // .env: provider key + base url + telegram + (optional) discord.
+  // A DISABLED primary (enabled === false) is treated as no active model: we drop
+  // the key/base so the agent has nothing to call (the "off" state) but keep the
+  // saved entry in panel-state so it can be re-enabled.
   const env = readEnv();
-  if (state.primary) {
+  const primaryActive = state.primary && state.primary.enabled !== false;
+  if (primaryActive) {
     if (state.primary.apiKey) env.OPENAI_API_KEY = state.primary.apiKey;
     env.OPENAI_BASE_URL = state.primary.baseURL;
+  } else {
+    delete env.OPENAI_API_KEY;
+    delete env.OPENAI_BASE_URL;
   }
   // Telegram is the canonical messaging channel; Discord is mapped too if added.
-  const tg = (state.channels || []).find((c) => c.type === 'telegram');
-  const dc = (state.channels || []).find((c) => c.type === 'discord');
+  // Only ENABLED channels are wired (a disabled channel disconnects but stays saved).
+  const tg = (state.channels || []).find((c) => c.type === 'telegram' && c.enabled !== false);
+  const dc = (state.channels || []).find((c) => c.type === 'discord' && c.enabled !== false);
   const approved = (state.approved && typeof state.approved === 'object') ? state.approved : {};
   if (tg) {
     env.TELEGRAM_BOT_TOKEN = tg.token;
@@ -369,8 +377,8 @@ module.exports = {
   async status() {
     const st = loadState();
     const modelsJson = {
-      resolvedDefault: st.primary ? st.primary.model : null,
-      fallbacks: (st.fallbacks || []).map((f) => f.model),
+      resolvedDefault: (st.primary && st.primary.enabled !== false) ? st.primary.model : null,
+      fallbacks: (st.fallbacks || []).filter((f) => f && f.enabled !== false).map((f) => f.model),
     };
     const channelsJson = (st.channels || [])
       .filter((c) => c.enabled !== false)
@@ -382,19 +390,19 @@ module.exports = {
     // Structured view for the UI lists. ids are the same values removeX() filters
     // by: primary id = provider, fallback id = model, channel id = type, mcp id =
     // name. Empty arrays / null where nothing is configured.
+    // Show ALL items (enabled AND disabled) with an `enabled` flag so the UI can
+    // render a per-row on/off toggle next to remove. The top status counts above
+    // still reflect only the ENABLED ones (modelsJson/channelsJson/mcpsJson).
     const configured = {
       primary: st.primary
-        ? { id: st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model, keyHint: hintOf(st.primary, st.primary.apiKey) }
+        ? { id: st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model, keyHint: hintOf(st.primary, st.primary.apiKey), enabled: st.primary.enabled !== false }
         : null,
       fallbacks: (st.fallbacks || [])
-        .filter((f) => f && f.enabled !== false)
-        .map((f) => ({ id: f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey) })),
+        .map((f) => ({ id: f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey), enabled: f.enabled !== false })),
       channels: (st.channels || [])
-        .filter((c) => c && c.enabled !== false)
-        .map((c) => ({ id: c.type, type: c.type, label: c.label, keyHint: hintOf(c, c.token) })),
+        .map((c) => ({ id: c.type, type: c.type, label: c.label, keyHint: hintOf(c, c.token), enabled: c.enabled !== false })),
       mcps: (st.mcps || [])
-        .filter((x) => x && x.enabled !== false)
-        .map((x) => ({ id: x.name, name: x.name, url: x.url, keyHint: hintOf(x, x.apiKey) })),
+        .map((x) => ({ id: x.name, name: x.name, url: x.url, keyHint: hintOf(x, x.apiKey), enabled: x.enabled !== false })),
     };
 
     return {
@@ -444,6 +452,31 @@ module.exports = {
     return { ok: apply.ok, restart: apply };
   },
 
+  // Enable/disable a configured item WITHOUT removing it (panel toggle). kind is
+  // 'primary' | 'fallback' | 'channel' | 'mcp'; id matches status().configured ids
+  // (primary→provider, fallback→model, channel→type, mcp→name). Persists the flag
+  // and re-applies (applyAll only wires ENABLED items into config.yaml + .env).
+  async setEnabled({ kind, id, enabled } = {}) {
+    const on = !(enabled === false || enabled === 'false' || enabled === 0 || enabled === '0');
+    const st = loadState();
+    let found = false;
+    if (kind === 'primary') {
+      if (st.primary) { st.primary.enabled = on; found = true; }
+    } else if (kind === 'fallback') {
+      for (const f of (st.fallbacks || [])) if (f && (f.model === id || f.id === id)) { f.enabled = on; found = true; }
+    } else if (kind === 'channel') {
+      for (const c of (st.channels || [])) if (c && c.type === id) { c.enabled = on; found = true; }
+    } else if (kind === 'mcp') {
+      for (const m of (st.mcps || [])) if (m && m.name === id) { m.enabled = on; found = true; }
+    } else {
+      return { error: 'unknown kind' };
+    }
+    if (!found) return { error: 'not found' };
+    saveState(st);
+    const apply = applyAll(st, `toggle-${kind}`);
+    return { ok: apply.ok, enabled: on, restart: apply };
+  },
+
   async setPrimary(provider, apiKey, custom, model) {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
       return { error: 'missing api key' };
@@ -451,7 +484,7 @@ module.exports = {
     if (r.error) return { error: r.error };
 
     const st = loadState();
-    st.primary = { provider, label: r.label, model: r.model, baseURL: r.baseURL, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()) };
+    st.primary = { provider, label: r.label, model: r.model, baseURL: r.baseURL, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()), enabled: true };
     saveState(st);
     const apply = applyAll(st, 'set-primary');
     // Shape mirrors openclaw: front-end checks r.auth.ok && (!r.set || r.set.ok).
@@ -543,6 +576,15 @@ module.exports = {
   // references that env var). The agent picks it up on the next restart.
   async addMcp({ provider, apiKey, name: customName, url: customUrl }) {
     if (!MCPS[provider]) return { error: 'unknown mcp' };
+    // Reuse-the-key: when adding the Avots MCP and no key is supplied, fall back
+    // to the avots primary's key — the same av_mcp_ token works for BOTH the
+    // OpenAI API surface and the MCP surface, so the client needn't paste it twice.
+    if (provider === 'avots' && (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)) {
+      const st0 = loadState();
+      if (st0.primary && st0.primary.provider === 'avots' && st0.primary.apiKey) {
+        apiKey = st0.primary.apiKey;
+      }
+    }
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
       return { error: 'missing api key' };
     let name, url;
@@ -598,6 +640,7 @@ module.exports = {
       baseURL: PROVIDERS.avots.baseURL,
       apiKey: key.trim(),
       keyHint: maskKey(key.trim()),
+      enabled: true,
     };
     saveState(st);
     const apply = applyAll(st, 'preconnect-avots');
