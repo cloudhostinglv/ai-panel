@@ -1110,14 +1110,14 @@
         defaultModel = list.includes(want) ? want
           : (list.includes(PRIMARY_MODELS.avots[0]) ? PRIMARY_MODELS.avots[0] : list[0]);
       }
-      // Avots order: FREE models first (the attractive, hard-to-miss option), then
-      // paid models most-expensive-first. Others keep the curated order.
+      // Avots order: strictly by per-message price, most expensive first. FREE
+      // models (price 0) therefore sort to the bottom as the cheapest — consistent
+      // with the desc ordering; the "· FREE" label keeps them easy to spot.
+      // (Models with no known price sort last of all.)
       let ordered = list;
       if (annotate) {
         const est = (id) => { const p = priceFor(id); return (p && p.per_message_est != null) ? p.per_message_est : -Infinity; };
-        const frees = list.filter(isFreeModel);
-        const paid = list.filter((id) => !isFreeModel(id)).sort((a, b) => est(b) - est(a));
-        ordered = frees.concat(paid);
+        ordered = list.slice().sort((a, b) => est(b) - est(a));
       }
       sel.innerHTML =
         ordered.map(m => `<option value="${esc(m)}">${esc(m + (annotate ? priceSuffix(m) : ''))}</option>`).join('') +
