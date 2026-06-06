@@ -194,7 +194,9 @@ function writeConfig(state) {
     tools: {
       profile: 'coding',
       deny: ['browser', 'canvas'],
-      toolsBySender: { '*': ['exec', 'process', 'code_execution', 'write', 'edit', 'apply_patch'] },
+      // OpenClaw schema: each sender maps to a POLICY OBJECT (not a bare array).
+      // `{deny:[...]}` locks untrusted/unknown senders out of the high-blast tools.
+      toolsBySender: { '*': { deny: ['exec', 'process', 'code_execution', 'write', 'edit', 'apply_patch'] } },
       elevated: { enabled: false },
       loopDetection: { enabled: true, historySize: 30, warningThreshold: 10, criticalThreshold: 20, globalCircuitBreakerThreshold: 30 },
     },
