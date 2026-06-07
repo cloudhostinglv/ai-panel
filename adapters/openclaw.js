@@ -419,7 +419,30 @@ function listPairing() {
     const prev = byUser.get(key);
     if (!prev || (item.createdAt || 0) > (prev.createdAt || 0)) byUser.set(key, item);
   }
-  return [...byUser.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+  const rows = [...byUser.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+
+  // Hide anyone the panel already considers GRANTED for that platform — either
+  // Approved earlier (state.approved[platform]) or listed in the channel's
+  // "Allowed users". OpenClaw owns the pairing file and may leave a stale entry
+  // behind even after access is granted (e.g. the owner who messaged before being
+  // locked in), so without this filter an already-allowed user keeps showing up
+  // with an Approve button that does nothing visible. Filter is the source of
+  // truth; prunePending is just best-effort file cleanup.
+  let st; try { st = loadState(); } catch (_) { st = {}; }
+  const grantedCache = {};
+  const grantedFor = (platform) => {
+    if (grantedCache[platform]) return grantedCache[platform];
+    const set = new Set();
+    for (const x of ((st.approved && st.approved[platform]) || [])) { const v = String(x).trim(); if (v) set.add(v); }
+    for (const c of (st.channels || [])) {
+      if (c.type === platform && typeof c.allowedUsers === 'string') {
+        for (const x of c.allowedUsers.split(',')) { const v = x.trim(); if (v) set.add(v); }
+      }
+    }
+    grantedCache[platform] = set;
+    return set;
+  };
+  return rows.filter((r) => !(r.userId && grantedFor(r.platform).has(r.userId)));
 }
 
 // Best-effort: drop a user's pending entries from <platform>-pairing.json so the
