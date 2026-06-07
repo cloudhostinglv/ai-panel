@@ -250,6 +250,21 @@ function touchApplyRequest(reason) {
   return { ok: true, applyRequest: APPLY_REQUEST, reason: reason || 'apply' };
 }
 
+// Software update: touch <dir>/.update-request so the host updater path-unit runs
+// `git pull` the VM repo + `docker compose pull && up -d` (new panel image + any
+// bumped agent pin) and re-stamps .deploy-version.json. The panel can only signal;
+// the host does the privileged work (same split as the applier).
+const UPDATE_REQUEST = path.join(CONFIG_DIR, '.update-request');
+const DEPLOY_VERSION_FILE = path.join(CONFIG_DIR, '.deploy-version.json');
+function touchUpdateRequest(reason) {
+  fs.mkdirSync(CONFIG_DIR, { recursive: true });
+  fs.writeFileSync(UPDATE_REQUEST, `${new Date().toISOString()} ${reason || 'update'}\n`, { mode: 0o600 });
+  return { ok: true, updateRequest: UPDATE_REQUEST };
+}
+function readDeployVersion() {
+  try { return JSON.parse(fs.readFileSync(DEPLOY_VERSION_FILE, 'utf8')); } catch (_) { return null; }
+}
+
 // Emit openclaw.json from the panel state. Static blocks (gateway, tools policy,
 // sandbox) mirror the hardened openclaw-vm template; the dynamic blocks come from
 // the active primary (+ enabled fallbacks) and enabled channels. Secrets are
@@ -511,6 +526,7 @@ function prunePending(platform, userId) {
 module.exports = {
   id: 'openclaw',
   label: 'OpenClaw',
+  repo: 'openclaw-vm',   // GitHub repo (cloudhostinglv/<repo>) the updater git-pulls
 
   capabilities: {
     primary: true,
@@ -745,4 +761,8 @@ module.exports = {
   },
 
   restart() { return touchApplyRequest('manual-restart'); },
+
+  // Software update: report the deployed VM-repo version, and request an update.
+  deployVersion() { return readDeployVersion(); },
+  requestUpdate() { return touchUpdateRequest('panel-update'); },
 };

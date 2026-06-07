@@ -20,6 +20,14 @@
  * All agent methods are present (so server.js can route uniformly) but return a
  * gentle "not applicable for builder" notice rather than doing anything.
  */
+const fs = require('fs');
+const path = require('path');
+
+// Where the panel can write request/version files the host updater watches. For
+// builders the compose mounts ./paneldata -> the container HOME, so that host dir
+// is where .update-request + .deploy-version.json live.
+const BUILDER_DATA_DIR = process.env.PANEL_DATA_DIR || process.env.HOME || '/paneldata';
+
 function buildOpenProductUrl() {
   const domain = (process.env.PANEL_DOMAIN || '').trim();
   // Panel is on :8443; the builder's own UI is on :443 (the default https port),
@@ -35,6 +43,7 @@ module.exports = function makeBuilder({ id, label, productPort }) {
   return {
     id,
     label,
+    repo: `${id}-vm`,   // GitHub repo (cloudhostinglv/<repo>) the updater git-pulls
     // Internal port the product listens on (documentation/diagnostics only; the
     // public URL is always https://<PANEL_DOMAIN> on :443 fronted by Caddy).
     productPort,
@@ -99,5 +108,20 @@ module.exports = function makeBuilder({ id, label, productPort }) {
 
     // No gateway to restart for a builder; the product manages its own lifecycle.
     async restart() { return { ok: true, skipped: 'builder-no-restart' }; },
+
+    // Software update works the same for builders: report the deployed VM-repo
+    // version and request an update (host updater git-pulls + recreates the panel
+    // side-stack). The product's own stack updates via its own channel.
+    deployVersion() {
+      try { return JSON.parse(fs.readFileSync(path.join(BUILDER_DATA_DIR, '.deploy-version.json'), 'utf8')); }
+      catch (_) { return null; }
+    },
+    requestUpdate() {
+      try {
+        fs.mkdirSync(BUILDER_DATA_DIR, { recursive: true });
+        fs.writeFileSync(path.join(BUILDER_DATA_DIR, '.update-request'), `${new Date().toISOString()} panel-update\n`, { mode: 0o600 });
+        return { ok: true };
+      } catch (e) { return { ok: false, error: String((e && e.message) || e) }; }
+    },
   };
 };

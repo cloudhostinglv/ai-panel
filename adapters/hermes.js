@@ -236,6 +236,20 @@ function touchApplyRequest(reason) {
   return { ok: true, applyRequest: APPLY_REQUEST, reason: reason || 'apply' };
 }
 
+// Software update: touch <data>/.update-request so the host updater path-unit runs
+// `git pull` the VM repo + `docker compose pull && up -d` and re-stamps the
+// deployed version. The panel only signals; the host does the privileged work.
+const UPDATE_REQUEST = path.join(DATA_DIR, '.update-request');
+const DEPLOY_VERSION_FILE = path.join(DATA_DIR, '.deploy-version.json');
+function touchUpdateRequest(reason) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(UPDATE_REQUEST, `${new Date().toISOString()} ${reason || 'update'}\n`, { mode: 0o600 });
+  return { ok: true, updateRequest: UPDATE_REQUEST };
+}
+function readDeployVersion() {
+  try { return JSON.parse(fs.readFileSync(DEPLOY_VERSION_FILE, 'utf8')); } catch (_) { return null; }
+}
+
 // Re-emit config.yaml + .env from the current panel-state, then request apply.
 // This is the single funnel every mutation goes through.
 function applyAll(state, reason) {
@@ -413,6 +427,7 @@ function parseUserRef(body) {
 module.exports = {
   id: 'hermes',
   label: 'Hermes',
+  repo: 'hermes-vm',   // GitHub repo (cloudhostinglv/<repo>) the updater git-pulls
 
   // Agent surface. Primary + messaging are fully implemented via the data-dir
   // mechanism. Fallback + MCP are exposed but degrade gracefully (TODO upstream).
@@ -732,4 +747,8 @@ module.exports = {
   },
 
   restart() { return touchApplyRequest('manual-restart'); },
+
+  // Software update: report the deployed VM-repo version, and request an update.
+  deployVersion() { return readDeployVersion(); },
+  requestUpdate() { return touchUpdateRequest('panel-update'); },
 };

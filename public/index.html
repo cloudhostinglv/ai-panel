@@ -422,6 +422,20 @@
       background: var(--brand-soft); color: var(--brand-hover); border-color: var(--brand-line);
     }
     button.restart:disabled { opacity: .6; cursor: default; }
+    /* Update software: same shape as Restart but brand-filled to signal an action
+       is available, plus a soft pulse to draw the eye. Hidden unless an update is found. */
+    button.update {
+      width: auto; margin: 0; padding: 9px 18px;
+      background: var(--brand); color: #fff;
+      border: 1px solid transparent; border-radius: 9px;
+      font-size: 14px; font-weight: 600;
+      cursor: pointer; font-family: inherit;
+      transition: background .15s, opacity .15s;
+      animation: updatePulse 2.4s ease-in-out infinite;
+    }
+    button.update:hover:not(:disabled) { background: var(--brand-hover); }
+    button.update:disabled { opacity: .7; cursor: default; animation: none; }
+    @keyframes updatePulse { 0%,100% { box-shadow: 0 0 0 0 var(--brand-soft); } 50% { box-shadow: 0 0 0 5px var(--brand-soft); } }
 
     .toggle {
       position: relative; display: inline-block;
@@ -500,6 +514,9 @@
   <header class="topbar">
     <span class="brand"><span class="logo" aria-hidden="true">✦</span> <span data-i18n="brandLabel">AI Control Panel</span></span>
     <div class="topbar-actions">
+      <!-- Update software. Hidden unless /api/version reports a newer panel or VM
+           build is available; clicking git-pulls + re-pulls images via the host updater. -->
+      <button id="updateBtn" class="update" type="button" hidden data-i18n="updateBtn">Update software</button>
       <!-- Restart the agent (gateway). Shown only for agent products; hidden for builders. -->
       <button id="restartBtn" class="restart" type="button" hidden data-i18n="restartBtn">Restart</button>
       <button id="logoutBtn" class="logout" type="button" data-i18n="settingsSignOut">Sign out</button>
@@ -735,6 +752,10 @@
         restartBtn: 'Restart', restarting: 'Restarting…', restartDone: 'Restarting ✓',
         restartConfirm: 'Restart the assistant now? It will be unavailable for a few seconds.',
         restartErr: 'Could not restart',
+        updateBtn: 'Update software', updating: 'Updating…',
+        updateConfirm: 'Update to the latest version now? The panel and assistant restart, and this page reconnects in a moment.',
+        updateErr: 'Could not start the update.',
+        updateStarted: 'Updating… this page will reconnect shortly.',
         cfgSavedAi: 'Saved AI providers', cfgActivePrimary: 'Active primary', cfgSetAsPrimary: 'Set as primary',
         cfgSavedFallbacks: 'Saved fallbacks', cfgSavedFallback: 'Saved fallback',
         cfgEnabledChain: 'Enabled (in chain)', cfgDisabledChain: 'Disabled (saved but skipped)',
@@ -1768,6 +1789,39 @@
       }
     });
 
+    // --- Software update -----------------------------------------------------
+    // Poll /api/version and reveal the Update button only when a newer panel OR VM
+    // build exists. Tooltip shows current -> latest for both panel and software.
+    async function checkUpdates() {
+      const btn = $('updateBtn'); if (!btn) return;
+      let v;
+      try { v = await (await fetch('/api/version', { headers: { accept: 'application/json' } })).json(); }
+      catch (_) { return; }
+      if (!v || typeof v !== 'object') return;
+      const p = v.panel || {}, s = v.software || {};
+      const fmt = (o) => `${o.current || '?'} → ${o.latest || '?'}${o.updateAvailable ? ' ⬆' : ''}`;
+      btn.title = `panel: ${fmt(p)} · software: ${fmt(s)}`;
+      setHidden('updateBtn', !v.updateAvailable);
+    }
+
+    // Trigger the update: POST /api/update (adapter writes .update-request, the host
+    // updater git-pulls + docker compose pull/up). The panel container is recreated,
+    // so this page drops — show a notice and reload once it's likely back.
+    $('updateBtn').addEventListener('click', async () => {
+      const btn = $('updateBtn');
+      if (!confirm(T('updateConfirm'))) return;
+      btn.disabled = true; btn.textContent = T('updating');
+      let r;
+      try { r = await post('/api/update', {}); } catch (_) { r = null; }
+      if (r && r.ok !== false && !r.error) {
+        try { alert(T('updateStarted')); } catch (_) {}
+        setTimeout(() => window.location.reload(), 30000);
+      } else {
+        btn.disabled = false; btn.textContent = T('updateBtn');
+        alert(T('updateErr') + (r && r.error ? (': ' + r.error) : ''));
+      }
+    });
+
     // OAuth return handling: /oauth/avots/callback redirects back here with
     // ?connected=avots on success or ?avots_error=<reason> on failure. Show an
     // inline banner, refresh status (so the new primary/MCP shows), select the
@@ -1804,6 +1858,8 @@
     renderDropdowns(LOCAL_PROVIDERS);  // fill the fallback dropdown (instant, offline-safe)
     loadPricing();                     // fetch avots pricing once; annotates the Avots model picker
     loadStatus().then(handleAvotsReturn);  // status first (sets CAPS) then process any OAuth return
+    checkUpdates();                    // reveal the Update button if a newer build exists
+    setInterval(checkUpdates, 30 * 60 * 1000);  // re-check hourly-ish (cache is 1h server-side)
   </script>
 </body>
 </html>

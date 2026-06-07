@@ -328,6 +328,63 @@ app.post('/api/restart', async (_req, res) => {
   }
 });
 
+// === software update (version check + trigger) =============================
+// Compare the running panel build (PANEL_VERSION, baked by CI) and the deployed
+// VM-repo version (stamped by the host updater) against the latest commit on each
+// repo's default branch. The trigger asks the adapter to write .update-request;
+// the host updater then git-pulls + docker compose pull/up (panel + any bumped
+// agent pin). Panel runs unprivileged, so it can only signal — like the applier.
+const GH_OWNER = 'cloudhostinglv';
+const GH_TTL_MS = 60 * 60 * 1000;            // 1h, like the pricing cache
+const ghCache = new Map();                    // repo -> { at, sha }
+async function ghLatestSha(repo) {
+  if (!repo) return null;
+  const now = Date.now();
+  const c = ghCache.get(repo);
+  if (c && (now - c.at) < GH_TTL_MS) return c.sha;
+  try {
+    const resp = await fetch(`https://api.github.com/repos/${GH_OWNER}/${repo}/commits/main`, {
+      headers: { accept: 'application/vnd.github+json', 'user-agent': 'ai-panel' },
+    });
+    if (!resp.ok) throw new Error('github ' + resp.status);
+    const body = await resp.json();
+    const sha = (body && typeof body.sha === 'string') ? body.sha : null;
+    ghCache.set(repo, { at: now, sha });
+    return sha;
+  } catch (e) {
+    console.error(`[version] latest for ${repo} failed:`, (e && e.message) || e);
+    return (c && c.sha) || null;              // serve stale on error; never throw
+  }
+}
+const shortSha = (s) => (typeof s === 'string' && s ? s.slice(0, 7) : null);
+
+app.get('/api/version', async (_req, res) => {
+  const panelCur = (process.env.PANEL_VERSION || '').trim() || null;
+  const deploy = (typeof adapter.deployVersion === 'function') ? (adapter.deployVersion() || null) : null;
+  const deployCur = (deploy && (deploy.vm_sha || deploy.sha)) || null;
+  const repo = adapter.repo || null;
+  const [panelLatest, deployLatest] = await Promise.all([ghLatestSha('ai-panel'), ghLatestSha(repo)]);
+  // updateAvailable only when BOTH sides are known (avoid false positives when a
+  // version is unknown — e.g. a local 'dev' panel or a VM not yet stamped).
+  const avail = (cur, latest) => !!(cur && latest && cur !== 'dev' && cur !== latest);
+  const panel = { current: shortSha(panelCur), latest: shortSha(panelLatest), updateAvailable: avail(panelCur, panelLatest) };
+  const software = { repo, current: shortSha(deployCur), latest: shortSha(deployLatest), updateAvailable: avail(deployCur, deployLatest) };
+  res.json({ panel, software, updateAvailable: panel.updateAvailable || software.updateAvailable });
+});
+
+app.post('/api/update', async (_req, res) => {
+  if (typeof adapter.requestUpdate !== 'function') {
+    return res.status(404).json({ error: `update is not available for product '${PRODUCT}'` });
+  }
+  try {
+    const r = await adapter.requestUpdate();
+    if (r && r.ok === false) return res.status(400).json(r);
+    res.json({ ok: true, ...(r && typeof r === 'object' ? r : {}) });
+  } catch (e) {
+    res.status(500).json({ error: String((e && e.message) || e) });
+  }
+});
+
 // === pairing (native approval queue) =======================================
 // Users who message the agent but aren't approved show up in status().pairing
 // .pending (read straight from the data dir). Approving one delegates to the
