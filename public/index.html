@@ -546,13 +546,15 @@
       <div id="status"><div class="row"><span data-i18n="statusLoading">Loading…</span></div></div>
     </div>
 
-    <!-- Access requests (native Hermes pairing). Shown only for products with
-         capabilities.pairing AND when at least one person is waiting. Someone who
-         messages the bot but isn't approved lands here; Approve lets them in. -->
+    <!-- Access requests (pairing). Shown for products with capabilities.pairing
+         when someone is waiting OR someone already has access. New people land in
+         the pending list (Approve); everyone with access shows below with an
+         on/off switch (disable without removing) and a remove button. -->
     <div class="card" id="pairing-card" hidden>
       <h2><span class="ico">🔑</span> <span data-i18n="pairingTitle">Access requests</span></h2>
       <p class="hint" style="margin-top:2px" data-i18n="pairingHint">People who messaged your bot and are waiting for access. Approve to let them in - they can then use the assistant on any model.</p>
       <div class="configured" id="pairingList" style="margin-top:12px"></div>
+      <div class="configured" id="grantedList" style="margin-top:12px"></div>
       <div class="msg" id="pairingMsg"></div>
     </div>
 
@@ -748,6 +750,7 @@
         pairingHint: 'People who messaged your bot and are waiting for access. Approve to let them in - they can then use the assistant on any model.',
         pairingApprove: 'Approve', pairingApproving: 'Approving…', pairingApproved: 'Approved. They can use the bot now.',
         pairingErr: 'Could not approve. Try again.',
+        grantedTitle: 'People with access',
         msgSaving: 'Saving…', msgAdding: 'Adding…', msgConnecting: 'Connecting…',
         msgAiSaved: 'AI saved and active.',
         msgFbAdded: 'Fallback AI added.',
@@ -1404,9 +1407,12 @@
     function renderPairing(pairing, cap) {
       const card = $('pairing-card'); const list = $('pairingList');
       if (!card || !list) return;
-      const pending = (cap && cap.pairing && pairing && Array.isArray(pairing.pending)) ? pairing.pending : [];
-      if (!pending.length) { card.hidden = true; list.innerHTML = ''; return; }
-      card.hidden = false;
+      const ok = cap && cap.pairing && pairing;
+      const pending = (ok && Array.isArray(pairing.pending)) ? pairing.pending : [];
+      const granted = (ok && Array.isArray(pairing.granted)) ? pairing.granted : [];
+      // Card is visible when someone is waiting OR someone already has access.
+      card.hidden = !(pending.length || granted.length);
+      // Pending requests (Approve).
       list.innerHTML = pending.map((p) => {
         const name = p.userName || ('User ' + (p.userId || '?'));
         const bits = [p.platform, p.userId ? ('ID ' + p.userId) : '', p.code].filter(Boolean);
@@ -1418,6 +1424,9 @@
             `${esc(T('pairingApprove'))}</button>` +
         `</div>`;
       }).join('');
+      // Granted users — reuse the connected-list renderer: each row gets an on/off
+      // switch (kind 'user' -> /api/toggle) and a remove button (-> /api/pairing/revoke).
+      renderConfiguredList('grantedList', T('grantedTitle'), granted, '/api/pairing/revoke', 'user');
     }
 
     // Delegated handler for every trash button in a .configured list: POST the

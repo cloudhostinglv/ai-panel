@@ -317,15 +317,12 @@ function writeConfig(state) {
     channels: {},
   };
 
-  const approved = (state.approved && typeof state.approved === 'object') ? state.approved : {};
   for (const c of (state.channels || []).filter((x) => x && x.enabled !== false)) {
-    // allowFrom = the user-typed "Allowed users" csv  +  anyone Approved from the
-    // Access-requests queue (state.approved[type]), de-duped.
-    const ids = mergeAllowed(c.allowedUsers, approved[c.type]);
+    // allowFrom = typed "Allowed users" (minus disabled) + ENABLED approved users.
     cfg.channels[c.type] = {
       enabled: true,
       botToken: '${' + channelTokenEnv(c.type) + '}',
-      allowFrom: ids,
+      allowFrom: [...effectiveAllow(state, c.type)],
     };
   }
 
@@ -351,15 +348,70 @@ function applyAll(state, reason) {
   return touchApplyRequest(reason);
 }
 
-// === pairing (Access requests) =============================================
-// Merge a comma-separated "Allowed users" string with an array of approved ids,
-// trimmed + de-duped, into the ARRAY form OpenClaw's channels.<type>.allowFrom
-// expects. (Hermes' mergeAllowed returns a csv; OpenClaw wants an array.)
-function mergeAllowed(csv, extra) {
+// === pairing / access (Access requests + granted users) ====================
+// state.approved[platform] holds users granted via the Access-requests queue.
+// Entries are objects { id, enabled, name }; legacy bare-id strings count as
+// enabled. Normalizing in place lets every caller rely on the object shape and
+// lets a granted user be DISABLED (remembered) and re-ENABLED, like the other
+// connected lists — rather than only added/removed.
+function normApprovedList(arr) {
+  return (Array.isArray(arr) ? arr : []).map((e) =>
+    (e && typeof e === 'object')
+      ? { id: String(e.id || '').trim(), enabled: e.enabled !== false, name: e.name || '' }
+      : { id: String(e).trim(), enabled: true, name: '' }
+  ).filter((e) => e.id);
+}
+function approvedFor(state, platform) {
+  state.approved = (state.approved && typeof state.approved === 'object') ? state.approved : {};
+  state.approved[platform] = normApprovedList(state.approved[platform]);
+  return state.approved[platform];
+}
+// Effective allowFrom id set for a platform: the channel's typed "Allowed users"
+// (minus anyone explicitly disabled) plus every ENABLED approved user.
+function effectiveAllow(state, platform) {
+  const appr = approvedFor(state, platform);
+  const disabled = new Set(appr.filter((e) => !e.enabled).map((e) => e.id));
   const set = new Set();
-  for (const x of String(csv || '').split(',')) { const v = x.trim(); if (v) set.add(v); }
-  for (const x of (Array.isArray(extra) ? extra : [])) { const v = String(x).trim(); if (v) set.add(v); }
-  return [...set];
+  const ch = (state.channels || []).find((c) => c.type === platform);
+  if (ch && typeof ch.allowedUsers === 'string')
+    for (const s of ch.allowedUsers.split(',')) { const v = s.trim(); if (v && !disabled.has(v)) set.add(v); }
+  for (const e of appr) if (e.enabled) set.add(e.id);
+  return set;
+}
+// One row per granted user (typed field ∪ approved) for the UI. id is composite
+// "<platform>:<uid>" so the shared toggle/remove handlers carry the platform;
+// enabled = currently in the effective allowFrom.
+function listGranted(state) {
+  const platforms = new Set();
+  for (const c of (state.channels || [])) if (c && c.type) platforms.add(c.type);
+  for (const k of Object.keys((state.approved && typeof state.approved === 'object') ? state.approved : {})) platforms.add(k);
+  const rows = [];
+  for (const platform of platforms) {
+    const appr = approvedFor(state, platform);
+    const allow = effectiveAllow(state, platform);
+    const nameById = new Map(appr.map((e) => [e.id, e.name]));
+    const ids = new Set();
+    const ch = (state.channels || []).find((c) => c.type === platform);
+    if (ch && typeof ch.allowedUsers === 'string') for (const s of ch.allowedUsers.split(',')) { const v = s.trim(); if (v) ids.add(v); }
+    for (const e of appr) ids.add(e.id);
+    for (const id of ids) rows.push({
+      id: `${platform}:${id}`, platform, userId: id,
+      label: nameById.get(id) || ('User ' + id),
+      detail: `${platform} · ID ${id}`,
+      enabled: allow.has(id),
+    });
+  }
+  return rows;
+}
+// Accept either { id:"<platform>:<uid>" } (shared toggle/remove handlers) or an
+// explicit { platform, userId } (the Approve button).
+function parseUserRef(body) {
+  let platform = body && body.platform, userId = body && body.userId;
+  const id = body && body.id;
+  if ((!platform || !userId) && typeof id === 'string' && id.includes(':')) {
+    const i = id.indexOf(':'); platform = id.slice(0, i); userId = id.slice(i + 1);
+  }
+  return { platform: String(platform || '').trim(), userId: String(userId || '').trim() };
 }
 
 // Pull a user id / name / code / timestamp out of one pairing entry, tolerating
@@ -430,18 +482,7 @@ function listPairing() {
   // truth; prunePending is just best-effort file cleanup.
   let st; try { st = loadState(); } catch (_) { st = {}; }
   const grantedCache = {};
-  const grantedFor = (platform) => {
-    if (grantedCache[platform]) return grantedCache[platform];
-    const set = new Set();
-    for (const x of ((st.approved && st.approved[platform]) || [])) { const v = String(x).trim(); if (v) set.add(v); }
-    for (const c of (st.channels || [])) {
-      if (c.type === platform && typeof c.allowedUsers === 'string') {
-        for (const x of c.allowedUsers.split(',')) { const v = x.trim(); if (v) set.add(v); }
-      }
-    }
-    grantedCache[platform] = set;
-    return set;
-  };
+  const grantedFor = (platform) => grantedCache[platform] || (grantedCache[platform] = effectiveAllow(st, platform));
   return rows.filter((r) => !(r.userId && grantedFor(r.platform).has(r.userId)));
 }
 
@@ -514,8 +555,9 @@ module.exports = {
       mcps:     { ok: true, code: 0, stdout: '[]', stderr: '' },
       configured,
       // Access-requests queue: people who messaged the bot but aren't in allowFrom
-      // yet. The shared UI renders these as "Access requests" with Approve.
-      pairing: { pending: listPairing() },
+      // yet (Approve), plus the granted users (on/off + remove). The shared UI
+      // renders both in the "Access requests" card.
+      pairing: { pending: listPairing(), granted: listGranted(st) },
     };
   },
 
@@ -535,28 +577,31 @@ module.exports = {
     if (!(st.channels || []).some((c) => c.type === platform)) {
       return { error: `connect the ${platform} bot first (no channel to grant access to)` };
     }
-    st.approved = (st.approved && typeof st.approved === 'object') ? st.approved : {};
-    st.approved[platform] = Array.isArray(st.approved[platform]) ? st.approved[platform] : [];
-    if (!st.approved[platform].includes(uid)) st.approved[platform].push(uid);
+    const appr = approvedFor(st, platform);
+    const ex = appr.find((e) => e.id === uid);
+    if (ex) ex.enabled = true;
+    else {
+      const pend = listPairing().find((p) => p.platform === platform && p.userId === uid);
+      appr.push({ id: uid, enabled: true, name: (pend && pend.userName) || '' });
+    }
     prunePending(platform, uid);
     saveState(st);
     const apply = applyAll(st, 'approve-user');
     return { ok: apply.ok, queued: true, restart: apply };
   },
 
-  // Revoke access: drop the id from state.approved AND from the channel's typed
-  // "Allowed users" csv, then re-apply (so allowFrom no longer contains it).
-  async revokePairing({ platform, userId } = {}) {
+  // Remove a granted user entirely: drop from state.approved AND from the
+  // channel's typed "Allowed users", then re-apply. Accepts { id:"<plat>:<uid>" }
+  // (trash button) or { platform, userId }.
+  async revokePairing(body = {}) {
+    const { platform, userId } = parseUserRef(body);
     if (!PAIRING_PLATFORM_RE.test(platform || '')) return { error: 'invalid platform' };
-    const uid = String(userId == null ? '' : userId).trim();
-    if (!PAIRING_USERID_RE.test(uid)) return { error: 'invalid user id' };
+    if (!PAIRING_USERID_RE.test(userId || '')) return { error: 'invalid user id' };
     const st = loadState();
-    if (st.approved && Array.isArray(st.approved[platform])) {
-      st.approved[platform] = st.approved[platform].filter((x) => String(x) !== uid);
-    }
+    st.approved[platform] = approvedFor(st, platform).filter((e) => e.id !== userId);
     for (const c of (st.channels || [])) {
       if (c.type === platform && typeof c.allowedUsers === 'string') {
-        c.allowedUsers = c.allowedUsers.split(',').map((s) => s.trim()).filter((s) => s && s !== uid).join(',');
+        c.allowedUsers = c.allowedUsers.split(',').map((s) => s.trim()).filter((s) => s && s !== userId).join(',');
       }
     }
     saveState(st);
@@ -575,6 +620,17 @@ module.exports = {
       for (const f of (st.fallbacks || [])) if (f && (f.model === id || f.id === id)) { f.enabled = on; found = true; }
     } else if (kind === 'channel') {
       for (const c of (st.channels || [])) if (c && c.type === id) { c.enabled = on; found = true; }
+    } else if (kind === 'user') {
+      // Granted-user on/off. id is "<platform>:<uid>". Off keeps the user in
+      // state.approved with enabled:false so allowFrom drops them but they stay in
+      // the list to flip back on. A csv-origin user (typed in "Allowed users") is
+      // recorded into approved on first toggle so the off state persists.
+      const { platform, userId } = parseUserRef({ id });
+      if (!platform || !userId) return { error: 'invalid user ref' };
+      const appr = approvedFor(st, platform);
+      const ex = appr.find((e) => e.id === userId);
+      if (ex) ex.enabled = on; else appr.push({ id: userId, enabled: on, name: '' });
+      found = true;
     } else {
       return { error: 'unknown kind' };
     }

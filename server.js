@@ -295,7 +295,7 @@ app.post('/api/mcp/remove', requireCap('mcp'), async (req, res) => {
 // it doesn't have. Delegates to adapter.setEnabled; the UI re-runs loadStatus().
 app.post('/api/toggle', async (req, res) => {
   const kind = (req.body && req.body.kind) || '';
-  const capByKind = { primary: 'primary', fallback: 'fallback', channel: 'messaging', mcp: 'mcp' };
+  const capByKind = { primary: 'primary', fallback: 'fallback', channel: 'messaging', mcp: 'mcp', user: 'pairing' };
   const cap = capByKind[kind];
   if (!cap) return res.status(400).json({ error: `unknown kind '${kind}'` });
   if (!CAP[cap]) return res.status(404).json({ error: `'${kind}' is not available for product '${PRODUCT}'` });
