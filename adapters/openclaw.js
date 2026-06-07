@@ -94,6 +94,92 @@ function hintOf(o, fullKey) {
   return tail ? '…' + String(tail) : null;
 }
 
+// === vision capability =====================================================
+// OpenClaw reads a model's `input` array to decide whether to pass image
+// attachments NATIVELY. Declaring `image` for a TEXT-ONLY model (e.g. the avots
+// free gpt-oss-120b) makes OpenClaw forward photos to a backend that rejects
+// them -> "LLM request failed", then a degraded `image`-tool path that can't
+// fetch the authenticated Telegram file URL. So we must declare `image` ONLY for
+// genuinely vision-capable models.
+//
+// Source of truth is ONLINE: the avots /models catalog (OpenRouter-style) is
+// queried with the configured key and we read each model's input modalities.
+// When that's unavailable (non-avots provider, network error, or the field is
+// absent) we fall back to a conservative name heuristic — default TEXT-ONLY
+// (safe: at worst a vision model loses image support, never a crash), flag only
+// known vision families.
+function visionHeuristic(modelId) {
+  const m = String(modelId || '').toLowerCase();
+  if (!m) return false;
+  if (/gpt-oss|embed|whisper|\btts\b|moderation|rerank|\bguard\b/.test(m)) return false;
+  return /claude|gpt-4o|chatgpt-4o|gpt-4\.1|gpt-4-turbo|gpt-5|gemini|gemma-3|llava|pixtral|qwen.*vl|-vl\b|llama-?3\.2|llama-?4|internvl|grok.*vision|grok-[34]|mistral-small-3|mistral-medium|phi-4|glm-4v|kimi-vl|deepseek-vl|nova-lite|nova-pro|aya-vision|vision|multimodal/.test(m);
+}
+
+const AVOTS_MODELS_URL = 'https://api.avots.ai/openai/v1/models';
+const MODELS_TTL_MS = 60 * 60 * 1000;            // 1h, mirrors the panel's pricing cache
+let _modelsCache = { at: 0, map: null };          // map: base-id(lower) -> bool (vision)
+
+// Read image-modality out of one catalog entry across the shapes avots/OpenRouter
+// use. Returns true/false when the entry declares modalities, or null if unknown
+// (so the caller can fall back to the heuristic).
+function entryVision(m) {
+  const hasImg = (arr) => Array.isArray(arr) && arr.map(String).some((x) => /image|vision|visual|img/i.test(x));
+  const a = m && m.architecture;
+  if (a) {
+    if (Array.isArray(a.input_modalities)) return hasImg(a.input_modalities);
+    if (Array.isArray(a.inputModalities)) return hasImg(a.inputModalities);
+    if (typeof a.modality === 'string') return /image|vision|\bimg\b/i.test(a.modality);
+  }
+  if (Array.isArray(m && m.input)) return hasImg(m.input);
+  if (Array.isArray(m && m.modalities)) return hasImg(m.modalities);
+  return null;
+}
+
+const baseId = (s) => String(s || '').toLowerCase().split(':')[0];   // drop :free / :nitro variant suffix
+
+// Fetch + cache a base-id -> vision map from the avots catalog (authed). Caches
+// even an empty result to avoid hammering; an empty map just means "heuristic".
+async function avotsVisionMap(apiKey) {
+  const now = Date.now();
+  if (_modelsCache.map && (now - _modelsCache.at) < MODELS_TTL_MS) return _modelsCache.map;
+  const map = new Map();
+  try {
+    const resp = await fetch(AVOTS_MODELS_URL, { headers: { accept: 'application/json', authorization: 'Bearer ' + apiKey } });
+    if (resp && resp.ok) {
+      const body = await resp.json();
+      const arr = Array.isArray(body) ? body : (body && Array.isArray(body.data) ? body.data : []);
+      for (const m of arr) {
+        const id = baseId(m && m.id);
+        if (!id) continue;
+        const v = entryVision(m);
+        if (v !== null) map.set(id, v);
+      }
+    }
+  } catch (_) { /* offline / shape change -> empty map -> heuristic */ }
+  _modelsCache = { at: now, map };
+  return map;
+}
+
+// Resolve whether a model accepts images. Online (avots catalog) first, heuristic
+// fallback. Never throws.
+async function resolveVision(providerId, modelId, apiKey) {
+  if (providerId === 'avots' && apiKey) {
+    try {
+      const map = await avotsVisionMap(apiKey);
+      const bid = baseId(modelId);
+      if (map.has(bid)) return map.get(bid);
+    } catch (_) { /* fall through */ }
+  }
+  return visionHeuristic(modelId);
+}
+
+// What an entry's stored `vision` flag resolves to at config-write time (sync):
+// the persisted flag if present, else the heuristic. The online lookup happens
+// when the model is added (setPrimary/addFallback/preconnect), persisted to state.
+function visionFor(entry) {
+  return (entry && entry.vision != null) ? !!entry.vision : visionHeuristic(entry && entry.model);
+}
+
 function validateCustom(custom) {
   if (!custom || typeof custom !== 'object') return 'missing custom config';
   const { name, baseURL, modelId } = custom;
@@ -188,7 +274,9 @@ function writeConfig(state) {
       providers[pid].models.push({
         id: p.model,
         name: (p.label || pid) + ' ' + p.model,
-        input: ['text', 'image'],
+        // image ONLY for vision-capable models (resolved online when added,
+        // heuristic fallback) — declaring it for a text model breaks photo input.
+        input: visionFor(p) ? ['text', 'image'] : ['text'],
         contextWindow: DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
         reasoning: true,
@@ -477,8 +565,9 @@ module.exports = {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
     const r = resolveProvider(provider, custom, model);
     if (r.error) return { error: r.error };
+    const vision = await resolveVision(r.providerId, r.model, apiKey.trim());
     const st = loadState();
-    st.primary = { provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()), enabled: true };
+    st.primary = { provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()), vision, enabled: true };
     saveState(st);
     const apply = applyAll(st, 'set-primary');
     return {
@@ -492,9 +581,10 @@ module.exports = {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
     const r = resolveProvider(provider, custom);
     if (r.error) return { error: r.error };
+    const vision = await resolveVision(r.providerId, r.model, apiKey.trim());
     const st = loadState();
     st.fallbacks = st.fallbacks || [];
-    st.fallbacks.push({ provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), keyHint: maskKey(apiKey.trim()), enabled: true });
+    st.fallbacks.push({ provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), keyHint: maskKey(apiKey.trim()), vision, enabled: true });
     saveState(st);
     const apply = applyAll(st, 'add-fallback');
     return {
@@ -564,10 +654,11 @@ module.exports = {
     if (st.primary && st.primary.provider !== 'avots') {
       return { preconnected: false, skipped: 'other-primary-set' };
     }
+    const vision = await resolveVision('avots', PROVIDERS.avots.defaultModel, key.trim());
     st.primary = {
       provider: 'avots', providerId: 'avots', label: PROVIDERS.avots.label,
       model: PROVIDERS.avots.defaultModel, baseURL: PROVIDERS.avots.baseURL,
-      envRef: 'AVOTS_API_KEY', apiKey: key.trim(), keyHint: maskKey(key.trim()), enabled: true,
+      envRef: 'AVOTS_API_KEY', apiKey: key.trim(), keyHint: maskKey(key.trim()), vision, enabled: true,
     };
     saveState(st);
     const apply = applyAll(st, 'preconnect-avots');
