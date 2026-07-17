@@ -90,12 +90,21 @@ function channelTokenEnv(type) {
 // Built-in remote MCP catalog — mirrors LOCAL_MCPS in public/index.html. A built-in
 // provider posts only { provider, apiKey }; the adapter resolves the name (= provider
 // id) and url from here. 'custom' carries a user-supplied name + url.
+//
+// Every url below was PROBED on 2026-07-17 (POST a JSON-RPC initialize):
+//   avots       https://mcp.avots.ai/        -> 401 + WWW-Authenticate: Bearer  (live)
+//   linear      https://mcp.linear.app/mcp   -> 401 + WWW-Authenticate: Bearer  (live)
+//   sentry      https://mcp.sentry.dev/mcp   -> 401 + WWW-Authenticate: Bearer  (live)
+//   browserbase https://mcp.browserbase.com/mcp -> 200                          (live)
+// The inherited `/sse` urls are DEAD: Linear/Browserbase 404, and Sentry answers 410
+// "SSE transport has been removed ... use the HTTP transport at /mcp instead". Composio
+// is deliberately NOT here: it has no static endpoint (mcp.composio.dev redirects to
+// docs), it mints a per-user server url, so it belongs under 'Other MCP'.
 const MCPS = {
   avots:       { label: 'Avots.ai',    url: 'https://mcp.avots.ai/' },
-  composio:    { label: 'Composio',    url: 'https://mcp.composio.dev/composio/mcp' },
-  linear:      { label: 'Linear',      url: 'https://mcp.linear.app/sse' },
-  sentry:      { label: 'Sentry',      url: 'https://mcp.sentry.dev/sse' },
-  browserbase: { label: 'Browserbase', url: 'https://mcp.browserbase.com/sse' },
+  linear:      { label: 'Linear',      url: 'https://mcp.linear.app/mcp' },
+  sentry:      { label: 'Sentry',      url: 'https://mcp.sentry.dev/mcp' },
+  browserbase: { label: 'Browserbase', url: 'https://mcp.browserbase.com/mcp' },
   custom:      { label: 'Other MCP' },
 };
 // mcp name -> .env var, e.g. `avots` -> MCP_AVOTS_KEY, `my-github` -> MCP_MY_GITHUB_KEY.

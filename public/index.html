@@ -796,12 +796,11 @@
         provGoogle: 'Gemini', provOpenai: 'ChatGPT', provAnthropic: 'Claude',
         provCustom: 'Add your own',
         provAvots: 'Avots AI',
-        mcpProvComposio: 'Composio', mcpProvLinear: 'Linear', mcpProvSentry: 'Sentry',
+        mcpProvLinear: 'Linear', mcpProvSentry: 'Sentry',
         mcpProvBrowserbase: 'Browserbase', mcpProvCustom: 'Other MCP',
         chHintTelegram: '<strong>How to create a Telegram bot:</strong><ol><li>Open the Telegram app and message <a href="https://t.me/BotFather" target="_blank">@BotFather</a>.</li><li>Send <code>/newbot</code> and follow his instructions (choose a name and a username for your bot).</li><li>BotFather will reply with a token - copy it.</li><li>Paste it in the field above and click <b>Add channel</b>.</li></ol>',
         chHintDiscord: '<strong>How to create a Discord bot:</strong><ol><li>Open the <a href="https://discord.com/developers/applications" target="_blank">Discord Developer Portal</a> and click <b>New Application</b> (give it a name).</li><li>Inside the app, open the <b>Bot</b> tab in the left sidebar.</li><li>Click <b>Reset Token</b>, confirm, and copy the token Discord shows you.</li><li>Paste it in the field above and click <b>Add channel</b>.</li></ol>',
         mcpHintAvots: '<strong>How to get your Avots.ai key:</strong><ol><li>Sign in at <a href="https://app.avots.ai/" target="_blank">app.avots.ai</a>.</li><li>Open <b>Settings → Integrations</b>.</li><li>Create an MCP key (starts with <code>av_mcp_</code>).</li><li>Copy it, paste in the field above, click <b>Add MCP</b>.</li></ol>',
-        mcpHintComposio: '<strong>How to connect Composio:</strong><ol><li>Sign up at <a href="https://composio.dev/" target="_blank">composio.dev</a>.</li><li>Open <b>Settings → API Keys</b> and create a new key.</li><li>Copy the key and paste it above.</li><li>After saving, return to the Composio dashboard to authorize Gmail / Slack / Notion / etc. (all flow through this one key).</li></ol>',
         mcpHintLinear: '<strong>How to get a Linear API token:</strong><ol><li>In Linear, click your avatar → <b>Settings → API</b>.</li><li>Under <b>Personal API keys</b>, click <b>New API key</b> and give it a name.</li><li>Copy the token (Linear shows it only once!).</li><li>Paste it above and click <b>Add MCP</b>.</li></ol>',
         mcpHintSentry: '<strong>How to get a Sentry auth token:</strong><ol><li>In Sentry, open <b>Settings → Auth Tokens</b>.</li><li>Click <b>Create New Token</b> and give it the scopes <code>project:read</code> and <code>issue:read</code>.</li><li>Copy the token.</li><li>Paste it above and click <b>Add MCP</b>.</li></ol>',
         mcpHintBrowserbase: '<strong>How to get your Browserbase API key:</strong><ol><li>Sign in at <a href="https://browserbase.com/" target="_blank">browserbase.com</a>.</li><li>Open <b>Settings → API Keys</b>.</li><li>Create or copy your API key.</li><li>Paste it above and click <b>Add MCP</b>.</li></ol>',
@@ -879,10 +878,9 @@
     // "custom" lets the user point at any other Bearer-token MCP server.
     const LOCAL_MCPS = {
       avots:       { label: 'Avots.ai',    url: 'https://mcp.avots.ai/' },
-      composio:    { label: 'Composio',    url: 'https://mcp.composio.dev/composio/mcp' },
-      linear:      { label: 'Linear',      url: 'https://mcp.linear.app/sse' },
-      sentry:      { label: 'Sentry',      url: 'https://mcp.sentry.dev/sse' },
-      browserbase: { label: 'Browserbase', url: 'https://mcp.browserbase.com/sse' },
+      linear:      { label: 'Linear',      url: 'https://mcp.linear.app/mcp' },
+      sentry:      { label: 'Sentry',      url: 'https://mcp.sentry.dev/mcp' },
+      browserbase: { label: 'Browserbase', url: 'https://mcp.browserbase.com/mcp' },
       custom:      { label: 'Other MCP' },
     };
 
@@ -895,14 +893,6 @@
           '<li>Open <b>Settings → Integrations</b>.</li>' +
           '<li>Create an MCP key (starts with <code>av_mcp_</code>).</li>' +
           '<li>Copy it, paste in the field above, click <b>Add MCP</b>.</li>' +
-        '</ol>',
-      composio:
-        '<strong>How to connect Composio:</strong>' +
-        '<ol>' +
-          '<li>Sign up at <a href="https://composio.dev/" target="_blank">composio.dev</a>.</li>' +
-          '<li>Open <b>Settings → API Keys</b> and create a new key.</li>' +
-          '<li>Copy the key and paste it above.</li>' +
-          '<li>After saving, return to the Composio dashboard to authorize Gmail / Slack / Notion / etc. (all flow through this one key).</li>' +
         '</ol>',
       linear:
         '<strong>How to get a Linear API token:</strong>' +
