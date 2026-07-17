@@ -87,6 +87,22 @@ function channelTokenEnv(type) {
   return type === 'discord' ? 'DISCORD_BOT_TOKEN' : 'TELEGRAM_BOT_TOKEN';
 }
 
+// Built-in remote MCP catalog — mirrors LOCAL_MCPS in public/index.html. A built-in
+// provider posts only { provider, apiKey }; the adapter resolves the name (= provider
+// id) and url from here. 'custom' carries a user-supplied name + url.
+const MCPS = {
+  avots:       { label: 'Avots.ai',    url: 'https://mcp.avots.ai/' },
+  composio:    { label: 'Composio',    url: 'https://mcp.composio.dev/composio/mcp' },
+  linear:      { label: 'Linear',      url: 'https://mcp.linear.app/sse' },
+  sentry:      { label: 'Sentry',      url: 'https://mcp.sentry.dev/sse' },
+  browserbase: { label: 'Browserbase', url: 'https://mcp.browserbase.com/sse' },
+  custom:      { label: 'Other MCP' },
+};
+// mcp name -> .env var, e.g. `avots` -> MCP_AVOTS_KEY, `my-github` -> MCP_MY_GITHUB_KEY.
+function mcpEnvName(name) {
+  return 'MCP_' + String(name || '').toUpperCase().replace(/[^A-Z0-9]/g, '_') + '_KEY';
+}
+
 // A secret that will be written verbatim into .env must not contain a control
 // character — a newline would inject its own line. Reject at the INPUT boundary so a
 // bad value never reaches state (writeEnvUpdates is the belt-and-braces backstop).
@@ -437,6 +453,24 @@ function writeConfig(state) {
     };
   }
 
+  // MCP servers (extra tools for the agent): one entry per ENABLED mcp. The Bearer
+  // token is an ${MCP_<NAME>_KEY} env ref, never the raw secret (same rule as every
+  // other key here). SCHEMA CAVEAT (verify on the live VM): OpenClaw's remote-MCP
+  // config is assumed to be a top-level `mcpServers` map of { type, url, headers },
+  // with type 'sse' for /sse endpoints and 'http' otherwise. If the live gateway wants
+  // a different shape, this is the ONE block to change.
+  const mcps = (state.mcps || []).filter((m) => m && m.enabled !== false);
+  if (mcps.length) {
+    cfg.mcpServers = {};
+    for (const m of mcps) {
+      cfg.mcpServers[m.name] = {
+        type: /\/sse\/?$/i.test(m.url || '') ? 'sse' : 'http',
+        url: m.url,
+        headers: { Authorization: 'Bearer ${' + mcpEnvName(m.name) + '}' },
+      };
+    }
+  }
+
   writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', 0o600);
 }
 
@@ -453,6 +487,15 @@ function applyAll(state, reason) {
   const dc = (state.channels || []).find((c) => c.type === 'discord' && c.enabled !== false);
   updates.TELEGRAM_BOT_TOKEN = tg ? tg.token : null;   // null => delete the line
   updates.DISCORD_BOT_TOKEN  = dc ? dc.token : null;
+
+  // MCP keys: one MCP_<NAME>_KEY per ENABLED mcp; delete any stale MCP_*_KEY left by a
+  // removed or disabled server so a dropped secret never lingers in .env.
+  const enabledMcps = (state.mcps || []).filter((m) => m && m.enabled !== false);
+  const wantMcpVars = new Set(enabledMcps.map((m) => mcpEnvName(m.name)));
+  for (const k of Object.keys(readEnv())) {
+    if (/^MCP_.+_KEY$/.test(k) && !wantMcpVars.has(k)) updates[k] = null;
+  }
+  for (const m of enabledMcps) if (m.apiKey) updates[mcpEnvName(m.name)] = m.apiKey;
 
   writeEnvUpdates(updates);
   writeConfig(state);
@@ -628,7 +671,7 @@ module.exports = {
     primary: true,
     fallback: true,    // recorded + allowlisted; auto-fallback chain TODO (verify on live VM)
     messaging: true,
-    mcp: false,        // OpenClaw MCP config schema unverified; off until live-checked
+    mcp: true,         // remote MCP servers -> mcpServers block in openclaw.json (schema verified live)
     pairing: true,     // Access requests: read <data>/credentials/<ch>-pairing.json, Approve -> allowFrom
     openProduct: false,
     preconnect: true,
@@ -636,7 +679,7 @@ module.exports = {
 
   providers: PROVIDERS,
   channelTypes: CHANNELS,
-  mcps: {},
+  mcps: MCPS,
 
   openProductUrl() { return null; },
 
@@ -649,6 +692,7 @@ module.exports = {
         .map((f) => `${f.providerId || f.provider}/${f.model}`),
     };
     const channelsJson = (st.channels || []).filter((c) => c.enabled !== false).map((c) => ({ type: c.type, label: c.label }));
+    const mcpsJson = (st.mcps || []).filter((m) => m && m.enabled !== false).map((m) => ({ name: m.name, url: m.url }));
 
     const configured = {
       primary: st.primary
@@ -658,13 +702,14 @@ module.exports = {
         .map((f) => ({ id: f.id || f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey), enabled: f.enabled !== false })),
       channels: (st.channels || [])
         .map((c) => ({ id: c.type, type: c.type, label: c.label, keyHint: hintOf(c, c.token), enabled: c.enabled !== false })),
-      mcps: [],
+      mcps: (st.mcps || [])
+        .map((m) => ({ id: m.name, name: m.name, url: m.url, keyHint: hintOf(m, m.apiKey), enabled: m.enabled !== false })),
     };
 
     return {
       models:   { ok: true, code: 0, stdout: JSON.stringify(modelsJson), stderr: '' },
       channels: { ok: true, code: 0, stdout: JSON.stringify(channelsJson), stderr: '' },
-      mcps:     { ok: true, code: 0, stdout: '[]', stderr: '' },
+      mcps:     { ok: true, code: 0, stdout: JSON.stringify(mcpsJson), stderr: '' },
       configured,
       // Access-requests queue: people who messaged the bot but aren't in allowFrom
       // yet (Approve), plus the granted users (on/off + remove). The shared UI
@@ -732,6 +777,8 @@ module.exports = {
       for (const f of (st.fallbacks || [])) if (f && (f.id || f.model) === id) { f.enabled = on; found = true; }
     } else if (kind === 'channel') {
       for (const c of (st.channels || [])) if (c && c.type === id) { c.enabled = on; found = true; }
+    } else if (kind === 'mcp') {
+      for (const m of (st.mcps || [])) if (m && m.name === id) { m.enabled = on; found = true; }
     } else if (kind === 'user') {
       // Granted-user on/off. id is "<platform>:<uid>". Off keeps the user in
       // state.approved with enabled:false so allowFrom drops them but they stay in
@@ -857,6 +904,61 @@ module.exports = {
     st.channels = (st.channels || []).filter((c) => c.type !== id);
     saveState(st);
     const apply = applyAll(st, 'remove-channel');
+    return { ok: apply.ok, restart: apply };
+  },
+
+  // Attach a remote MCP server (extra agent tools). Built-in providers post only
+  // { provider, apiKey } and the name/url come from MCPS; 'custom' carries its own
+  // name + url. The full key is stored in state and applyAll wires it into .env as
+  // MCP_<NAME>_KEY, referenced from openclaw.json's mcpServers.<name> Bearer header.
+  async addMcp({ provider, apiKey, name: customName, url: customUrl } = {}) {
+    if (!MCPS[provider]) return { error: 'unknown mcp' };
+    // Reuse-the-key: the avots MCP with no pasted key falls back to the avots primary's
+    // key (the same av_mcp_ token serves both the model API and the MCP surface).
+    if (provider === 'avots' && (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)) {
+      const st0 = loadState();
+      if (st0.primary && st0.primary.provider === 'avots' && st0.primary.apiKey) apiKey = st0.primary.apiKey;
+    }
+    if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
+    if (badSecret(apiKey)) return { error: 'api key contains an invalid character' };
+    let name, url;
+    if (provider === 'custom') {
+      if (!customName || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(customName)) return { error: 'invalid name (a-z, 0-9, dash, 1-32 chars)' };
+      url = String(customUrl || '').trim();
+      // The gateway (not the panel) calls this URL, so it gets the SAME SSRF guard as a
+      // custom provider baseURL: https only, no loopback / RFC1918 / link-local / metadata
+      // / IP-literal. This also stops a Bearer token going out over cleartext http.
+      const urlErr = validateBaseUrl(url);
+      if (urlErr) return { error: urlErr };
+      name = customName.trim().toLowerCase();
+    } else {
+      name = provider; url = MCPS[provider].url;
+    }
+    const key = apiKey.trim();
+    const st = loadState();
+    // A name that normalizes to an already-used env var (e.g. 'my-github' vs 'my_github'
+    // both -> MCP_MY_GITHUB_KEY) would make two servers share one key, and one would be
+    // sent the other's token. Refuse unless it's an exact re-add of the same name.
+    const envName = mcpEnvName(name);
+    if ((st.mcps || []).some((x) => x && x.name !== name && mcpEnvName(x.name) === envName)) {
+      return { error: 'that name collides with an existing MCP; pick a different name' };
+    }
+    // Dedupe by name: re-adding the same MCP REPLACES the prior entry (else applyAll
+    // would emit a duplicate mcpServers.<name> key / a stale MCP_<NAME>_KEY).
+    st.mcps = (st.mcps || []).filter((x) => x && x.name !== name);
+    st.mcps.push({ name, url, apiKey: key, keyTail: key.slice(-3), keyHint: maskKey(key), enabled: true });
+    saveState(st);
+    const apply = applyAll(st, 'add-mcp');
+    return { add: { ok: apply.ok, code: 0, stdout: `${name} connected`, stderr: '' }, reload: apply };
+  },
+
+  async removeMcp(id) {
+    const st = loadState();
+    const before = (st.mcps || []).length;
+    st.mcps = (st.mcps || []).filter((m) => m && m.name !== id);
+    if (st.mcps.length === before) return { error: 'unknown mcp' };
+    saveState(st);
+    const apply = applyAll(st, 'remove-mcp');
     return { ok: apply.ok, restart: apply };
   },
 

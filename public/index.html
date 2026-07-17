@@ -805,7 +805,7 @@
         mcpHintLinear: '<strong>How to get a Linear API token:</strong><ol><li>In Linear, click your avatar → <b>Settings → API</b>.</li><li>Under <b>Personal API keys</b>, click <b>New API key</b> and give it a name.</li><li>Copy the token (Linear shows it only once!).</li><li>Paste it above and click <b>Add MCP</b>.</li></ol>',
         mcpHintSentry: '<strong>How to get a Sentry auth token:</strong><ol><li>In Sentry, open <b>Settings → Auth Tokens</b>.</li><li>Click <b>Create New Token</b> and give it the scopes <code>project:read</code> and <code>issue:read</code>.</li><li>Copy the token.</li><li>Paste it above and click <b>Add MCP</b>.</li></ol>',
         mcpHintBrowserbase: '<strong>How to get your Browserbase API key:</strong><ol><li>Sign in at <a href="https://browserbase.com/" target="_blank">browserbase.com</a>.</li><li>Open <b>Settings → API Keys</b>.</li><li>Create or copy your API key.</li><li>Paste it above and click <b>Add MCP</b>.</li></ol>',
-        mcpHintCustom: 'Provide a <b>name</b> (any short id), the MCP server\'s <b>URL</b>, and a <b>Bearer token</b>. The panel will register it via <code>openclaw mcp add</code>.',
+        mcpHintCustom: 'Provide a <b>name</b> (any short id), the MCP server\'s <b>URL</b>, and a <b>Bearer token</b>. The panel adds it to the agent config and restarts the agent.',
       },
     };
     // English-only. The i18n machinery is kept (single `en` dictionary) so the
@@ -929,7 +929,7 @@
           '<li>Paste it above and click <b>Add MCP</b>.</li>' +
         '</ol>',
       custom:
-        'Provide a <b>name</b> (any short id), the MCP server\'s <b>URL</b>, and a <b>Bearer token</b>. The panel will register it via <code>openclaw mcp add</code>.',
+        'Provide a <b>name</b> (any short id), the MCP server\'s <b>URL</b>, and a <b>Bearer token</b>. The panel adds it to the agent config and restarts the agent.',
     };
 
     // Smooth-scroll to a section/card and briefly flash a blue ring so the eye
@@ -1758,7 +1758,7 @@
       if (!apiKey && !mcpAvotsReuse()) { show($('mcpMsg'), false, 'Error: API key required'); busy(b, false); return; }
       if (provider === 'custom') {
         if (!name || !url) { show($('mcpMsg'), false, 'Error: fill in name and URL'); busy(b, false); return; }
-        if (!/^https?:\/\//.test(url)) { show($('mcpMsg'), false, 'Error: URL must start with http:// or https://'); busy(b, false); return; }
+        if (!/^https:\/\//i.test(url)) { show($('mcpMsg'), false, 'Error: URL must start with https://'); busy(b, false); return; }
       }
 
       const body = { provider, apiKey };
