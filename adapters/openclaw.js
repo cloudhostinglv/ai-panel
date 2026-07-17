@@ -19,8 +19,11 @@
  *                           bot tokens, and OPENCLAW_GATEWAY_TOKEN (preserved).
  *   <dir>/.apply-request  — touched after each write to signal the host applier.
  *   <dir>/panel-state.json — the panel's structured view (provider/key meta,
- *                           enabled flags, allowFrom ids); never the secret beyond
- *                           the masked keyHint shown in the UI.
+ *                           enabled flags, allowFrom ids). NOTE: this file DOES hold
+ *                           the full API keys / bot tokens in cleartext (the panel
+ *                           re-emits them into .env on every apply). Only the masked
+ *                           keyHint is shown in the UI, but at rest the secret is here
+ *                           too — treat it exactly like .env (0600, same care).
  *
  * Env: OPENCLAW_DATA_DIR | OPENCLAW_CONFIG_DIR — the shared dir as the panel sees
  * it (the compose mounts the host ~/.openclaw here; default /data).
@@ -35,6 +38,10 @@
  */
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
+
+// Short stable id for a config entry (fallbacks). Not a secret.
+function genId() { return crypto.randomBytes(6).toString('hex'); }
 
 const CONFIG_DIR = process.env.OPENCLAW_DATA_DIR || process.env.OPENCLAW_CONFIG_DIR || '/data';
 const CONFIG_FILE = path.join(CONFIG_DIR, 'openclaw.json');
@@ -78,6 +85,13 @@ function envRefFor(providerId) {
 }
 function channelTokenEnv(type) {
   return type === 'discord' ? 'DISCORD_BOT_TOKEN' : 'TELEGRAM_BOT_TOKEN';
+}
+
+// A secret that will be written verbatim into .env must not contain a control
+// character — a newline would inject its own line. Reject at the INPUT boundary so a
+// bad value never reaches state (writeEnvUpdates is the belt-and-braces backstop).
+function badSecret(v) {
+  return typeof v !== 'string' || /[\x00-\x1f\x7f]/.test(v);
 }
 
 // --- masked key fingerprint (same as hermes) -------------------------------
@@ -143,6 +157,7 @@ async function avotsVisionMap(apiKey) {
   const now = Date.now();
   if (_modelsCache.map && (now - _modelsCache.at) < MODELS_TTL_MS) return _modelsCache.map;
   const map = new Map();
+  let ok = false;
   try {
     const resp = await fetch(AVOTS_MODELS_URL, { headers: { accept: 'application/json', authorization: 'Bearer ' + apiKey } });
     if (resp && resp.ok) {
@@ -154,9 +169,13 @@ async function avotsVisionMap(apiKey) {
         const v = entryVision(m);
         if (v !== null) map.set(id, v);
       }
+      ok = arr.length > 0;
     }
-  } catch (_) { /* offline / shape change -> empty map -> heuristic */ }
-  _modelsCache = { at: now, map };
+  } catch (_) { /* offline / shape change -> fall through, DON'T cache the empty map */ }
+  // Cache only a real answer for the full hour. A transient failure returns an empty
+  // map used once (heuristic fallback), but is NOT cached — otherwise one blip would
+  // degrade vision detection for every model for an hour.
+  if (ok) _modelsCache = { at: now, map };
   return map;
 }
 
@@ -185,10 +204,39 @@ function validateCustom(custom) {
   const { name, baseURL, modelId } = custom;
   if (!name || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(name))
     return 'invalid name (a-z, 0-9, dash, 1-32 chars)';
-  if (!baseURL || !/^https?:\/\/[\w.-]+(:\d+)?(\/.*)?$/.test(baseURL))
-    return 'invalid base URL (must start with http:// or https://)';
-  if (!modelId || typeof modelId !== 'string' || modelId.trim().length < 1)
-    return 'missing model id';
+  if (!baseURL || typeof baseURL !== 'string') return 'missing base URL';
+  return validateBaseUrl(baseURL) || (
+    (!modelId || typeof modelId !== 'string' || modelId.trim().length < 1) ? 'missing model id' : null
+  );
+}
+
+// The gateway (not the panel) calls this URL, so it must not point at the host's own
+// metadata service or an internal address. Require https and block loopback,
+// link-local, the cloud metadata IP, and RFC1918 ranges. A hostname we cannot judge
+// statically (a real domain) is allowed — the point is to stop obvious SSRF targets.
+function validateBaseUrl(baseURL) {
+  let u;
+  try { u = new URL(baseURL); } catch (_) { return 'invalid base URL'; }
+  if (u.protocol !== 'https:') return 'base URL must use https://';
+  // new URL() lower-cases the host already; normalise two things the raw string can
+  // still carry: a single trailing dot (`localhost.` resolves to localhost) and the
+  // brackets around an IPv6 literal (`[::1]` -> `::1`).
+  let h = u.hostname.replace(/\.$/, '');
+  const bracketed = h.startsWith('[') && h.endsWith(']');
+  if (bracketed) h = h.slice(1, -1);
+  // Any IPv6 ADDRESS LITERAL as a provider baseURL is refused outright: real providers
+  // are addressed by DNS name, and a blocklist over IPv6 (loopback ::1, unspecified ::,
+  // IPv4-mapped ::ffff:169.254.169.254, etc.) is too leaky to trust. The bracket test
+  // above catches the URL form; the ':' test catches a bare literal defensively.
+  if (bracketed || h.includes(':')) {
+    return 'base URL may not be an IP-literal or internal address';
+  }
+  if (h === 'localhost' || h.endsWith('.localhost') || h === '169.254.169.254' ||
+      /^127\./.test(h) || /^10\./.test(h) || /^192\.168\./.test(h) ||
+      /^169\.254\./.test(h) || /^172\.(1[6-9]|2\d|3[01])\./.test(h) ||
+      /^0\./.test(h) || h === '0.0.0.0') {
+    return 'base URL may not be an internal or loopback address';
+  }
   return null;
 }
 
@@ -218,31 +266,79 @@ function resolveProvider(provider, custom, modelOverride) {
 }
 
 // --- state + file helpers ---------------------------------------------------
+// Every writer goes through writeAtomic: write a sibling temp file, fsync, then
+// rename into place. rename() is atomic on the same filesystem, so the gateway
+// (restarted the instant .apply-request appears) never reads a half-written
+// openclaw.json / .env — the old fs.writeFileSync could be caught mid-write.
+function writeAtomic(file, data, mode) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  const tmp = `${file}.tmp.${process.pid}.${TMP_SEQ++}`;
+  const fd = fs.openSync(tmp, 'w', mode);
+  try { fs.writeSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
+  fs.renameSync(tmp, file);
+}
+let TMP_SEQ = 0;
+
 function loadState() {
   try { return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8')); }
   catch (_) { return { primary: null, fallbacks: [], channels: [], mcps: [] }; }
 }
 function saveState(s) {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  fs.writeFileSync(STATE_FILE, JSON.stringify(s, null, 2), { mode: 0o600 });
+  writeAtomic(STATE_FILE, JSON.stringify(s, null, 2), 0o600);
 }
+
+// readEnv/writeEnv preserve the ORIGINAL file. The panel manages only its own
+// KEY=VALUE lines; anything else — comments, `export FOO=…`, OPENCLAW_GATEWAY_TOKEN,
+// pre-seeded provider keys, blank lines — is kept verbatim. The old version
+// reconstructed the file from a flat map, which silently dropped every line it did
+// not recognise (and dropped any managed key whose value went empty).
 function readEnv() {
   const out = {};
   try {
-    for (const line of fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
-      const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line.trim());
+    for (const raw of fs.readFileSync(ENV_FILE, 'utf8').split(/\r?\n/)) {
+      const line = raw.replace(/^\s*export\s+/, '').trim();
+      if (!line || line.startsWith('#')) continue;
+      const m = /^([A-Za-z_][A-Za-z0-9_]*)=(.*)$/.exec(line);
       if (m) out[m[1]] = m[2];
     }
   } catch (_) {}
   return out;
 }
-function writeEnv(map) {
-  fs.mkdirSync(CONFIG_DIR, { recursive: true });
-  const body = Object.entries(map)
-    .filter(([, v]) => v != null && v !== '')
-    .map(([k, v]) => `${k}=${v}`)
-    .join('\n') + '\n';
-  fs.writeFileSync(ENV_FILE, body, { mode: 0o600 });
+// Update only the given keys in the existing .env text, in place. A key mapped to
+// null/undefined is DELETED; every other line is left exactly as it was. Values are
+// hard-rejected if they contain CR/LF: a newline in a pasted key/token would inject
+// arbitrary lines into .env (and be read back as its own variable).
+function writeEnvUpdates(updates) {
+  for (const [k, v] of Object.entries(updates)) {
+    if (v != null && /[\r\n]/.test(String(v))) {
+      throw new Error(`refusing to write ${k}: value contains a newline`);
+    }
+  }
+  let text = '';
+  try { text = fs.readFileSync(ENV_FILE, 'utf8'); } catch (_) {}
+  const lines = text.length ? text.split('\n') : [];
+  // strip a single trailing empty element from a file that ended in '\n'
+  if (lines.length && lines[lines.length - 1] === '') lines.pop();
+  const seen = new Set();
+  const out = [];
+  for (const raw of lines) {
+    const bare = raw.replace(/^\s*export\s+/, '');
+    const m = /^([A-Za-z_][A-Za-z0-9_]*)=/.exec(bare.trim());
+    const key = m && m[1];
+    // hasOwnProperty, NOT `key in updates`: `in` walks the prototype chain, so a foreign
+    // line named `constructor` / `toString` / `__proto__` / `valueOf` would match a
+    // built-in and be clobbered with a stringified native method.
+    if (key && Object.prototype.hasOwnProperty.call(updates, key)) {
+      seen.add(key);
+      if (updates[key] != null) out.push(`${key}=${updates[key]}`);   // else: drop the line
+    } else {
+      out.push(raw);
+    }
+  }
+  for (const [k, v] of Object.entries(updates)) {
+    if (!seen.has(k) && v != null) out.push(`${k}=${v}`);
+  }
+  writeAtomic(ENV_FILE, out.join('\n') + '\n', 0o600);
 }
 function touchApplyRequest(reason) {
   fs.mkdirSync(CONFIG_DIR, { recursive: true });
@@ -341,24 +437,24 @@ function writeConfig(state) {
     };
   }
 
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', { mode: 0o600 });
+  writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', 0o600);
 }
 
 // Re-emit .env (secrets) + openclaw.json, then request apply. Single funnel for
-// every mutation. OPENCLAW_GATEWAY_TOKEN and any other pre-seeded keys are
-// preserved (readEnv keeps them).
+// every mutation. Only the keys the panel manages are touched; OPENCLAW_GATEWAY_TOKEN
+// and any other pre-seeded lines are left verbatim by writeEnvUpdates.
 function applyAll(state, reason) {
-  const env = readEnv();
-  const setKey = (p) => { if (p && p.apiKey) env[p.envRef || envRefFor(p.providerId || p.provider)] = p.apiKey; };
+  const updates = {};
+  const setKey = (p) => { if (p && p.apiKey) updates[p.envRef || envRefFor(p.providerId || p.provider)] = p.apiKey; };
   if (state.primary && state.primary.enabled !== false) setKey(state.primary);
   for (const f of (state.fallbacks || []).filter((x) => x && x.enabled !== false)) setKey(f);
 
   const tg = (state.channels || []).find((c) => c.type === 'telegram' && c.enabled !== false);
   const dc = (state.channels || []).find((c) => c.type === 'discord' && c.enabled !== false);
-  if (tg) env.TELEGRAM_BOT_TOKEN = tg.token; else delete env.TELEGRAM_BOT_TOKEN;
-  if (dc) env.DISCORD_BOT_TOKEN = dc.token; else delete env.DISCORD_BOT_TOKEN;
+  updates.TELEGRAM_BOT_TOKEN = tg ? tg.token : null;   // null => delete the line
+  updates.DISCORD_BOT_TOKEN  = dc ? dc.token : null;
 
-  writeEnv(env);
+  writeEnvUpdates(updates);
   writeConfig(state);
   return touchApplyRequest(reason);
 }
@@ -559,7 +655,7 @@ module.exports = {
         ? { id: st.primary.providerId || st.primary.provider, provider: st.primary.provider, label: st.primary.label, model: st.primary.model, keyHint: hintOf(st.primary, st.primary.apiKey), enabled: st.primary.enabled !== false }
         : null,
       fallbacks: (st.fallbacks || [])
-        .map((f) => ({ id: f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey), enabled: f.enabled !== false })),
+        .map((f) => ({ id: f.id || f.model, label: f.label, model: f.model, keyHint: hintOf(f, f.apiKey), enabled: f.enabled !== false })),
       channels: (st.channels || [])
         .map((c) => ({ id: c.type, type: c.type, label: c.label, keyHint: hintOf(c, c.token), enabled: c.enabled !== false })),
       mcps: [],
@@ -633,7 +729,7 @@ module.exports = {
     if (kind === 'primary') {
       if (st.primary) { st.primary.enabled = on; found = true; }
     } else if (kind === 'fallback') {
-      for (const f of (st.fallbacks || [])) if (f && (f.model === id || f.id === id)) { f.enabled = on; found = true; }
+      for (const f of (st.fallbacks || [])) if (f && (f.id || f.model) === id) { f.enabled = on; found = true; }
     } else if (kind === 'channel') {
       for (const c of (st.channels || [])) if (c && c.type === id) { c.enabled = on; found = true; }
     } else if (kind === 'user') {
@@ -658,11 +754,22 @@ module.exports = {
 
   async setPrimary(provider, apiKey, custom, model) {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
+    if (badSecret(apiKey)) return { error: 'api key contains an invalid character' };
     const r = resolveProvider(provider, custom, model);
     if (r.error) return { error: r.error };
-    const vision = await resolveVision(r.providerId, r.model, apiKey.trim());
+    const primKey = apiKey.trim();
+    // Same-family guard (mirrors addFallback): a primary and a fallback of the same
+    // provider family share ONE env var, and applyAll writes fallbacks LAST, so a primary
+    // set after a same-family fallback would silently run on the FALLBACK's key. Refuse so
+    // the operator removes the stale fallback first (the OAuth "Connect Avots" turnkey also
+    // lands here, so this closes that path too).
+    const st0 = loadState();
+    if ((st0.fallbacks || []).some((e) => e && e.envRef === r.envRef && e.apiKey && e.apiKey !== primKey)) {
+      return { error: `a different ${r.providerId} key is already configured as a fallback; remove it first` };
+    }
+    const vision = await resolveVision(r.providerId, r.model, primKey);
     const st = loadState();
-    st.primary = { provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyHint: maskKey(apiKey.trim()), vision, enabled: true };
+    st.primary = { provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: primKey, keyHint: maskKey(primKey), vision, enabled: true };
     saveState(st);
     const apply = applyAll(st, 'set-primary');
     return {
@@ -674,12 +781,25 @@ module.exports = {
 
   async addFallback(provider, apiKey, custom) {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8) return { error: 'missing api key' };
+    if (badSecret(apiKey)) return { error: 'api key contains an invalid character' };
     const r = resolveProvider(provider, custom);
     if (r.error) return { error: r.error };
-    const vision = await resolveVision(r.providerId, r.model, apiKey.trim());
+    const key = apiKey.trim();
+    // Two entries of the same provider family share ONE env var (envRefFor keys by
+    // family), and one openclaw.json provider block, so a second key would silently
+    // overwrite the first. Refuse it instead of losing a key with no sign.
+    const st0 = loadState();
+    const clashes = (e) => e && e.envRef === r.envRef && e.apiKey && e.apiKey !== key;
+    if (clashes(st0.primary) || (st0.fallbacks || []).some(clashes)) {
+      return { error: `a different ${r.providerId} key is already configured; remove it first` };
+    }
+    const vision = await resolveVision(r.providerId, r.model, key);
     const st = loadState();
     st.fallbacks = st.fallbacks || [];
-    st.fallbacks.push({ provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: apiKey.trim(), keyTail: apiKey.trim().slice(-3), keyHint: maskKey(apiKey.trim()), vision, enabled: true });
+    // Unique id per entry: removeFallback/setEnabled used to match by f.model, so two
+    // fallbacks sharing a model (same model, different provider/key) were removed or
+    // toggled together. Key operations off this id instead.
+    st.fallbacks.push({ id: genId(), provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: key, keyTail: key.slice(-3), keyHint: maskKey(key), vision, enabled: true });
     saveState(st);
     const apply = applyAll(st, 'add-fallback');
     return {
@@ -692,7 +812,7 @@ module.exports = {
 
   async removeFallback(id) {
     const st = loadState();
-    st.fallbacks = (st.fallbacks || []).filter((f) => f && f.model !== id && f.id !== id);
+    st.fallbacks = (st.fallbacks || []).filter((f) => f && (f.id || f.model) !== id);
     saveState(st);
     const apply = applyAll(st, 'remove-fallback');
     return { ok: apply.ok, restart: apply };
@@ -715,6 +835,7 @@ module.exports = {
   async addChannel(channel, token, allowedUsers) {
     if (!CHANNELS[channel]) return { error: 'unknown channel' };
     if (!token || typeof token !== 'string' || token.length < 8) return { error: 'missing token' };
+    if (badSecret(token)) return { error: 'token contains an invalid character' };
     const st = loadState();
     st.channels = (st.channels || []).filter((c) => c.type !== channel);
     st.channels.push({
@@ -742,7 +863,8 @@ module.exports = {
   // Turnkey avots: set avots as primary if nothing is configured yet (idempotent).
   async preconnectAvots(key) {
     if (!key) return { preconnected: false, skipped: 'no-key' };
-    const st = loadState();
+    if (badSecret(key)) return { preconnected: false, skipped: 'bad-key' };
+    let st = loadState();
     if (st.primary && st.primary.provider === 'avots' && st.primary.apiKey) {
       return { preconnected: true, skipped: 'already-configured' };
     }
@@ -750,6 +872,13 @@ module.exports = {
       return { preconnected: false, skipped: 'other-primary-set' };
     }
     const vision = await resolveVision('avots', PROVIDERS.avots.defaultModel, key.trim());
+    // Re-read AFTER the await: preconnect runs fire-and-forget at boot and could race a
+    // user's setPrimary. Re-check on the fresh state so we never clobber a primary the
+    // user just set (the load->save below is then synchronous, so it cannot interleave).
+    st = loadState();
+    if (st.primary && st.primary.apiKey) {
+      return { preconnected: st.primary.provider === 'avots', skipped: 'primary-set-meanwhile' };
+    }
     st.primary = {
       provider: 'avots', providerId: 'avots', label: PROVIDERS.avots.label,
       model: PROVIDERS.avots.defaultModel, baseURL: PROVIDERS.avots.baseURL,

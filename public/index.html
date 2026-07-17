@@ -636,7 +636,7 @@
 
       <div class="sub-section" id="fallback-section">
         <p class="sub-h" data-i18n="fallbackTitle">Fallback AI</p>
-        <p class="hint" style="margin-top:2px" data-i18n="fallbackHint">If the primary AI hits its quota or errors out, the system automatically switches to this one.</p>
+        <p class="hint" style="margin-top:2px" data-i18n="fallbackHint">Saved as an alternate model you can switch to. Automatic failover depends on the agent build and is not guaranteed.</p>
         <div class="configured" id="fallbacksConfigured" hidden></div>
         <label for="fallbackProvider" data-i18n="fallbackChoose">Choose fallback AI</label>
         <select id="fallbackProvider"></select>
@@ -667,6 +667,9 @@
       <label for="token" data-i18n="messagingToken">Bot token</label>
       <input id="token" type="password" placeholder="Paste the bot token" data-i18n-ph="messagingTokenPh" autocomplete="off" />
       <div class="hint" id="channelHint"></div>
+      <label for="allowedUsers" data-i18n="messagingAllowed">Your user ID (who may use the bot)</label>
+      <input id="allowedUsers" type="text" placeholder="e.g. your Telegram numeric ID" data-i18n-ph="messagingAllowedPh" autocomplete="off" />
+      <div class="hint" id="allowedHint" data-i18n="messagingAllowedHint">Without an allowed ID the bot answers no one until you approve yourself under Access requests. Add your own ID here to skip that step. Separate several with commas.</div>
       <button id="saveChannel" data-i18n="messagingSave">Add channel</button>
       <div class="msg" id="channelMsg"></div>
     </div>
@@ -736,7 +739,10 @@
         customModelId: 'Model ID', customModelIdPh: 'e.g. llama-3.3-70b-versatile',
         dividerFallback: 'add a fallback',
         fallbackTitle: 'Fallback AI',
-        fallbackHint: 'If the primary AI hits its quota or errors out, the system automatically switches to this one.',
+        messagingAllowed: 'Your user ID (who may use the bot)',
+        messagingAllowedPh: 'e.g. your Telegram numeric ID',
+        messagingAllowedHint: 'Without an allowed ID the bot answers no one until you approve yourself under Access requests. Add your own ID here to skip that step. Separate several with commas.',
+        fallbackHint: 'Saved as an alternate model you can switch to. Automatic failover depends on the agent build and is not guaranteed.',
         fallbackChoose: 'Choose fallback AI', fallbackApiKeyPh: 'Paste the fallback AI key', fallbackSave: 'Add fallback AI',
         fbCustomNote: 'OpenAI-compatible endpoint only.', fbCustomNamePh: 'e.g. mygroq-backup',
         messagingTitle: 'Messaging', messagingChoose: 'Choose app',
@@ -1686,14 +1692,16 @@
       const b=$('saveChannel'); busy(b,true); show($('channelMsg'),true,'Connecting…');
       const token = $('token').value.trim();
       const channel = $('channel').value;
+      const allowedUsers = ($('allowedUsers') ? $('allowedUsers').value : '').trim();
       if (!token) { show($('channelMsg'), false, 'Error: bot token required'); busy(b,false); return; }
 
       let r;
-      try { r = await post('/api/channel', { channel, token }); }
+      try { r = await post('/api/channel', { channel, token, allowedUsers }); }
       catch(e) { show($('channelMsg'), false, 'Error: could not reach the server'); busy(b,false); return; }
       const ok = r.add && r.add.ok;
-      show($('channelMsg'), ok, ok ? 'Connected! Send your bot a message.' : ('Error: ' + ((r.add&&r.add.stderr)||r.error||'unknown')));
-      busy(b,false); if (ok) { $('token').value=''; loadStatus(); }
+      const done = allowedUsers ? 'Connected! Message your bot from that account.' : 'Connected! Send your bot a message, then approve yourself under Access requests.';
+      show($('channelMsg'), ok, ok ? done : ('Error: ' + ((r.add&&r.add.stderr)||r.error||'unknown')));
+      busy(b,false); if (ok) { $('token').value=''; if ($('allowedUsers')) $('allowedUsers').value=''; loadStatus(); }
     };
 
     // True when the user is adding the Avots MCP and the primary AI is already
@@ -1763,8 +1771,8 @@
       busy(b, false); if (ok) { $('mcpKey').value = ''; $('mcpName').value = ''; $('mcpUrl').value = ''; loadStatus(); }
     };
 
-    // Top-bar sign-out. Auth isn't wired yet, so this is cosmetic: try to POST
-    // /logout (ignored if the endpoint doesn't exist) then navigate to /login.
+    // Top-bar sign-out. POST /logout clears the real session cookie (auth.js), then
+    // navigate to /login. The try/catch keeps it graceful if the network blips.
     $('logoutBtn').addEventListener('click', async () => {
       try { await fetch('/logout', { method: 'POST' }); } catch(_) {}
       window.location = '/login';

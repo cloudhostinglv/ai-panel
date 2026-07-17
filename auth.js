@@ -55,16 +55,27 @@ function createAuth({ stateDir }) {
   const secureCookie = !truthy(process.env.PANEL_COOKIE_INSECURE); // Secure unless local plain-HTTP dev
 
   if (!enabled) {
-    if (truthy(process.env.PANEL_REQUIRE_AUTH)) {
-      console.error('[auth] PANEL_PASSWORD is not set and PANEL_REQUIRE_AUTH=1 - refusing to start open.');
+    // Fail CLOSED by default: the panel sets API keys and is published on a public
+    // :8443, so "no password" must not silently mean "no login". Running open now
+    // requires an explicit opt-in (PANEL_ALLOW_OPEN=1), which local dev/preview sets;
+    // every provisioned VM writes PANEL_PASSWORD, so production is never affected.
+    if (!truthy(process.env.PANEL_ALLOW_OPEN)) {
+      console.error('[auth] PANEL_PASSWORD is not set - refusing to start open. ' +
+        'Set PANEL_PASSWORD, or set PANEL_ALLOW_OPEN=1 for a trusted local run.');
       process.exit(1);
     }
-    console.warn('[auth] *** PANEL_PASSWORD is not set - the panel is running OPEN (no login). ' +
-      'Set PANEL_PASSWORD before exposing it publicly. ***');
+    console.warn('[auth] *** PANEL_ALLOW_OPEN=1 and no PANEL_PASSWORD - running OPEN (no login). ' +
+      'Never do this on a public host. ***');
   }
 
   // Per-VM signing secret, persisted so a restart does not drop every session.
   const secret = loadOrCreateSecret(stateDir);
+
+  // A short fingerprint of the current password, stamped into every session and
+  // checked on verify. Rotating PANEL_PASSWORD changes this, so all outstanding
+  // cookies (7-day TTL) stop validating the moment the password changes — otherwise
+  // a leaked or shared session survived a password rotation for a week.
+  const passEpoch = crypto.createHmac('sha256', secret).update('pw:' + password).digest('hex').slice(0, 12);
 
   function loadOrCreateSecret(dir) {
     const file = path.join(dir, 'session.key');
@@ -101,6 +112,7 @@ function createAuth({ stateDir }) {
     let obj;
     try { obj = JSON.parse(b64urlToBuf(payload).toString('utf8')); } catch (_) { return null; }
     if (!obj || typeof obj.exp !== 'number' || Date.now() > obj.exp) return null;
+    if (obj.pv !== passEpoch) return null;   // password rotated since this cookie was issued
     return obj;
   }
 
@@ -114,7 +126,11 @@ function createAuth({ stateDir }) {
       if (idx < 0) continue;
       const k = part.slice(0, idx).trim();
       if (!k) continue;
-      out[k] = decodeURIComponent(part.slice(idx + 1).trim());
+      // A malformed percent-sequence in ANY cookie makes decodeURIComponent throw; without
+      // this guard one bad cookie in the request would 500 the whole auth path. Fall back to
+      // the raw value (our own session cookie is base64url, so it never needs decoding).
+      const rawVal = part.slice(idx + 1).trim();
+      try { out[k] = decodeURIComponent(rawVal); } catch (_) { out[k] = rawVal; }
     }
     return out;
   }
@@ -175,7 +191,7 @@ function createAuth({ stateDir }) {
       return res.status(401).json({ error: 'Invalid username or password.' });
     }
     recordSuccess(req);
-    setSession(res, sign({ u: username, exp: Date.now() + SESSION_TTL_MS }));
+    setSession(res, sign({ u: username, pv: passEpoch, exp: Date.now() + SESSION_TTL_MS }));
     return res.json({ ok: true });
   }
 

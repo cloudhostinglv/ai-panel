@@ -5,7 +5,7 @@
  * The panel is PRODUCT-AWARE: the PRODUCT env var selects an adapter under
  * adapters/<product>.js that implements the active product's behaviour:
  *
- *   PRODUCT=openclaw (default) -> OpenClaw agent (CLI via execFile)
+ *   PRODUCT=openclaw (default) -> OpenClaw agent (writes ~/.openclaw config + .apply-request)
  *   PRODUCT=hermes             -> Hermes agent (data-dir config + .apply-request)
  *   PRODUCT=flowise|langflow|dify -> builders (reduced: link into the product UI)
  *
@@ -14,9 +14,10 @@
  * /api/status so the UI can render only the sections that apply. The avots
  * auto-preconnect and the local mock mode (front-end) are preserved.
  *
- * Security: each adapter is responsible for its own safety (openclaw uses
- * execFile with the key on stdin / tokens in 0600 files; hermes only writes the
- * unprivileged data dir; builders touch nothing). server.js never shells out.
+ * Security: each adapter is responsible for its own safety. openclaw and hermes only
+ * WRITE the unprivileged shared config dir (openclaw.json + .env at 0600) and touch
+ * .apply-request; a host-side applier does the privileged restart. Builders touch
+ * nothing. server.js never shells out.
  */
 const express = require('express');
 const fs = require('fs');
@@ -224,8 +225,20 @@ app.post('/api/channel', requireCap('messaging'), async (req, res) => {
   }
 });
 
+// Guard: a capability flag with no adapter method behind it would 500 on call.
+// The pairing/restart routes already check this; MCP must too, so flipping the mcp
+// capability on before adapter.addMcp exists fails cleanly with a 404, not a crash.
+function requireMethod(name) {
+  return (req, res, next) => {
+    if (typeof adapter[name] !== 'function') {
+      return res.status(404).json({ error: `'${name}' is not available for product '${PRODUCT}'` });
+    }
+    next();
+  };
+}
+
 // Attach an MCP server (extra tools for the agent).
-app.post('/api/mcp', requireCap('mcp'), async (req, res) => {
+app.post('/api/mcp', requireCap('mcp'), requireMethod('addMcp'), async (req, res) => {
   try {
     const r = await adapter.addMcp(req.body || {});
     if (r && r.error) return res.status(400).json(r);
@@ -278,7 +291,7 @@ app.post('/api/channel/remove', requireCap('messaging'), async (req, res) => {
 });
 
 // Detach an MCP server (by name id).
-app.post('/api/mcp/remove', requireCap('mcp'), async (req, res) => {
+app.post('/api/mcp/remove', requireCap('mcp'), requireMethod('removeMcp'), async (req, res) => {
   const { id } = req.body || {};
   try {
     const r = await adapter.removeMcp(id);
@@ -431,6 +444,14 @@ const PANEL_DOMAIN = (process.env.PANEL_DOMAIN || '').trim();
 //  2. mint PKCE verifier/challenge + state, stash the flow in memory (TTL),
 //  3. 302 the browser to the avots authorize URL.
 app.get('/oauth/avots/start', async (req, res) => {
+  // Reject a cross-site GET: SameSite=Lax still sends the session cookie on a
+  // top-level navigation, so another site could kick off this flow for a logged-in
+  // user. Sec-Fetch-Site (sent by modern browsers) is 'cross-site' for that; allow
+  // only same-origin / same-site / direct navigation ('none').
+  const sfs = String(req.headers['sec-fetch-site'] || '');
+  if (sfs && !['same-origin', 'same-site', 'none'].includes(sfs)) {
+    return res.status(403).json({ error: 'cross-site initiation blocked' });
+  }
   if (!CAP.primary) {
     return res.status(404).json({ error: `avots OAuth is not available for product '${PRODUCT}'` });
   }
@@ -516,7 +537,9 @@ app.get('/oauth/avots/callback', async (req, res) => {
 
   // Configure BOTH surfaces with the av_mcp_ token via the active adapter:
   //   primary → OpenAI provider (base_url maps to https://api.avots.ai/openai/v1)
-  //   MCP     → https://mcp.avots.ai/
+  //   MCP     → https://mcp.avots.ai/  — ONLY when the product exposes the mcp
+  //             capability AND adapter.addMcp exists (guarded below). OpenClaw has
+  //             mcp off today, so this configures the model side only.
   try {
     if (typeof adapter.setPrimary === 'function') {
       await adapter.setPrimary('avots', accessToken, null, flow.model || undefined);
