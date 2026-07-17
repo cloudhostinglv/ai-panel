@@ -462,22 +462,33 @@ function writeConfig(state) {
     };
   }
 
-  // MCP servers (extra tools for the agent): one entry per ENABLED mcp. The Bearer
-  // token is an ${MCP_<NAME>_KEY} env ref, never the raw secret (same rule as every
-  // other key here). SCHEMA CAVEAT (verify on the live VM): OpenClaw's remote-MCP
-  // config is assumed to be a top-level `mcpServers` map of { type, url, headers },
-  // with type 'sse' for /sse endpoints and 'http' otherwise. If the live gateway wants
-  // a different shape, this is the ONE block to change.
-  const mcps = (state.mcps || []).filter((m) => m && m.enabled !== false);
+  // MCP servers (extra tools for the agent): one entry per ENABLED mcp.
+  //
+  // SCHEMA VERIFIED against the shipped openclaw 2026.6.1 image (docs/cli/mcp.md +
+  // dist/zod-schema, cross-checked by running `openclaw mcp status/doctor` over a
+  // generated config):
+  //   * the block is `mcp.servers.<name>`, NOT a top-level `mcpServers`. The ROOT
+  //     schema is STRICT: a stray `mcpServers` key fails the WHOLE config with
+  //     'Unrecognized key', taking gateway/models/channels down with it.
+  //   * `transport` is an enum of exactly "sse" | "streamable-http". There is no
+  //     "http": that is only a CLI-native alias `openclaw mcp set` rewrites.
+  //   * `headers` values ARE ${VAR}-substituted at config load (proven: a missing var
+  //     reports `mcp.servers.<n>.headers.Authorization: Missing env var`), and OpenClaw
+  //     reads ~/.openclaw/.env itself. So the token stays an env ref, never inline.
+  // Only servers that actually carry a key are emitted: a ${VAR} with no matching .env
+  // line makes OpenClaw drop the server as unavailable.
+  const mcps = (state.mcps || []).filter((m) => m && m.enabled !== false && m.apiKey);
   if (mcps.length) {
-    cfg.mcpServers = {};
+    const servers = {};
     for (const m of mcps) {
-      cfg.mcpServers[m.name] = {
-        type: /\/sse\/?$/i.test(m.url || '') ? 'sse' : 'http',
+      servers[m.name] = {
+        enabled: true,
+        transport: /\/sse\/?$/i.test(m.url || '') ? 'sse' : 'streamable-http',
         url: m.url,
         headers: { Authorization: 'Bearer ${' + mcpEnvName(m.name) + '}' },
       };
     }
+    cfg.mcp = { servers };
   }
 
   writeAtomic(CONFIG_FILE, JSON.stringify(cfg, null, 2) + '\n', 0o600);
