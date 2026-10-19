@@ -1,13 +1,13 @@
 'use strict';
 /*
- * avots-oauth.js — keyless "Connect Avots" via OAuth 2.1 (DCR + PKCE).
+ * avots-oauth.js: keyless "Connect Avots" via OAuth 2.1 (DCR + PKCE).
  *
  * The avots backend (issuer https://mcp.avots.ai) is a public OAuth 2.1 server
  * that supports Dynamic Client Registration (DCR) and the Authorization Code
  * flow with PKCE (S256). The resulting access_token is a real `av_mcp_…` key
  * that works for BOTH the OpenAI-compatible API (https://api.avots.ai/openai/v1)
  * and the MCP endpoint (https://mcp.avots.ai/). So a single browser-based login
- * gives the panel everything it needs to configure the agent — no key paste.
+ * gives the panel everything it needs to configure the agent, with no key paste.
  *
  * This module is the pure OAuth machinery: endpoint URLs, DCR, PKCE helpers, an
  * in-memory flow store (keyed by `state`, ~10 min TTL, CSRF protection), and the
@@ -17,7 +17,7 @@
  *
  * Security: the access_token / refresh_token / code_verifier are NEVER logged.
  * Persisted files are written 0600. State is validated on callback (a flow that
- * isn't in the store — wrong/expired/forged state — is rejected). Uses Node's
+ * isn't in the store, i.e. a wrong, expired or forged state, is rejected). Uses Node's
  * global fetch and the crypto module (Node 18+).
  */
 const crypto = require('crypto');
@@ -81,7 +81,7 @@ function base64url(buf) {
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
 
-// code_verifier: 43–128 chars of [A-Za-z0-9-._~]. base64url of 32 random bytes
+// code_verifier: 43 to 128 chars of [A-Za-z0-9-._~]. base64url of 32 random bytes
 // yields 43 chars, comfortably inside the spec range.
 function makeCodeVerifier() {
   return base64url(crypto.randomBytes(32));

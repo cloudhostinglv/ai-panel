@@ -172,8 +172,7 @@
     const $ = (id) => document.getElementById(id);
 
     // English-only strings. The i18n machinery is kept (single `en` dictionary)
-    // so markup with data-i18n* hooks keeps working; the language switcher was
-    // removed - English is the default and only language.
+    // so markup with data-i18n* hooks keeps working.
     const I18N = {
       en: {
         title: 'Sign in - AI Assistant',
@@ -205,8 +204,8 @@
     }
     applyI18n();
 
-    // Form is wired against /login (POST) on the backend; until that endpoint
-    // exists, this just shows a placeholder error so the UI is testable.
+    // POST the credentials to /login; on success go to the panel, otherwise show
+    // the server's error (or a generic one if the backend is unreachable).
     $('loginForm').addEventListener('submit', async (e) => {
       e.preventDefault();
       const btn = $('loginForm').querySelector('button.primary');

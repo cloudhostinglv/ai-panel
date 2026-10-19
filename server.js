@@ -5,14 +5,14 @@
  * The panel is PRODUCT-AWARE: the PRODUCT env var selects an adapter under
  * adapters/<product>.js that implements the active product's behaviour:
  *
- *   PRODUCT=openclaw (default) -> OpenClaw agent (writes ~/.openclaw config + .apply-request)
- *   PRODUCT=hermes             -> Hermes agent (data-dir config + .apply-request)
+ *   PRODUCT=openclaw (default) -> OpenClaw agent (openclaw.json + .env in the data dir, then .apply-request)
+ *   PRODUCT=hermes             -> Hermes agent (config.yaml + .env in the data dir, then .apply-request)
  *   PRODUCT=flowise|langflow|dify -> builders (reduced: link into the product UI)
  *
  * server.js stays thin: it loads the adapter at boot and routes every /api/*
  * endpoint through it, surfacing the adapter's `capabilities` + `product` in
- * /api/status so the UI can render only the sections that apply. The avots
- * auto-preconnect and the local mock mode (front-end) are preserved.
+ * /api/status so the UI can render only the sections that apply. It also runs
+ * the one-time avots auto-preconnect at boot.
  *
  * Security: each adapter is responsible for its own safety. openclaw and hermes only
  * WRITE the unprivileged shared config dir (openclaw.json + .env at 0600) and touch
@@ -92,12 +92,12 @@ app.use(auth.gate);
 app.use(express.static(path.join(__dirname, 'public')));
 
 // === avots auto-preconnect (turnkey) =======================================
-// Same two hooks as Phase 1, in order:
-//   1. process.env.AVOTS_API_KEY        - set by the systemd unit / provisioner.
-//   2. ~/.openclaw/secrets/avots.key    - a 0600 file dropped on disk.
+// The key is read from, in order:
+//   1. process.env.AVOTS_API_KEY         - the environment (the VM compose passes it).
+//   2. $HOME/.openclaw/secrets/avots.key - a 0600 file on disk.
 // The actual connect work is delegated to adapter.preconnectAvots(key); each
-// product implements it appropriately (openclaw: CLI; hermes: data-dir write;
-// builders: documented stub). Failures are logged, never crash the panel.
+// product implements it (openclaw and hermes: write the data-dir config;
+// builders: report the key only). Failures are logged, never crash the panel.
 const AVOTS_KEY_FILE = path.join(process.env.HOME || os.homedir(), '.openclaw', 'secrets', 'avots.key');
 let avotsPreconnected = false;
 
@@ -127,7 +127,7 @@ async function preconnectAvots() {
     if (avotsPreconnected) {
       console.log(`[preconnect] avots preconnected via "${PRODUCT}" adapter` + (r.skipped ? ` (${r.skipped})` : ''));
     } else {
-      console.log(`[preconnect] avots not preconnected` + (r && r.skipped ? ` (${r.skipped})` : '') + (r && r.todo ? ` — ${r.todo}` : ''));
+      console.log(`[preconnect] avots not preconnected` + (r && r.skipped ? ` (${r.skipped})` : '') + (r && r.todo ? `: ${r.todo}` : ''));
     }
   } catch (e) {
     console.error('[preconnect] adapter.preconnectAvots threw:', (e && e.message) || e);
@@ -136,7 +136,7 @@ async function preconnectAvots() {
 
 // === routes ================================================================
 
-// /api/status — the UI's single source of truth. Includes the active product,
+// /api/status: the UI's single source of truth. Includes the active product,
 // its capability flags, and (for agents) the model/channel status the adapter
 // reports plus the catalogs the UI renders.
 app.get('/api/status', async (_req, res) => {
@@ -346,7 +346,7 @@ app.post('/api/restart', async (_req, res) => {
 // VM-repo version (stamped by the host updater) against the latest commit on each
 // repo's default branch. The trigger asks the adapter to write .update-request;
 // the host updater then git-pulls + docker compose pull/up (panel + any bumped
-// agent pin). Panel runs unprivileged, so it can only signal — like the applier.
+// agent pin). The panel runs unprivileged, so it can only signal the host.
 const GH_OWNER = 'cloudhostinglv';
 const GH_TTL_MS = 60 * 60 * 1000;            // 1h, like the pricing cache
 const ghCache = new Map();                    // repo -> { at, sha }
@@ -378,7 +378,7 @@ app.get('/api/version', async (_req, res) => {
   const repo = adapter.repo || null;
   const [panelLatest, deployLatest] = await Promise.all([ghLatestSha('ai-panel'), ghLatestSha(repo)]);
   // updateAvailable only when BOTH sides are known (avoid false positives when a
-  // version is unknown — e.g. a local 'dev' panel or a VM not yet stamped).
+  // version is unknown, e.g. a local 'dev' panel or a VM not yet stamped).
   const avail = (cur, latest) => !!(cur && latest && cur !== 'dev' && cur !== latest);
   const panel = { current: shortSha(panelCur), latest: shortSha(panelLatest), updateAvailable: avail(panelCur, panelLatest) };
   const software = { repo, current: shortSha(deployCur), latest: shortSha(deployLatest), updateAvailable: avail(deployCur, deployLatest) };
@@ -401,8 +401,8 @@ app.post('/api/update', async (_req, res) => {
 // === pairing (native approval queue) =======================================
 // Users who message the agent but aren't approved show up in status().pairing
 // .pending (read straight from the data dir). Approving one delegates to the
-// adapter, which hands the host applier a request to run the gateway's
-// `hermes pairing approve <platform> <code>`. Gated by the 'pairing' capability.
+// adapter, which adds the user id to the channel allowlist and asks the host
+// applier to restart the agent. Gated by the 'pairing' capability.
 app.post('/api/pairing/approve', requireCap('pairing'), async (req, res) => {
   if (typeof adapter.approvePairing !== 'function') {
     return res.status(404).json({ error: `pairing approve is not available for product '${PRODUCT}'` });
@@ -429,7 +429,7 @@ app.post('/api/pairing/revoke', requireCap('pairing'), async (req, res) => {
   }
 });
 
-// === Feature 1: "Connect Avots" via OAuth 2.1 (DCR + PKCE) — keyless =======
+// === Feature 1: "Connect Avots" via OAuth 2.1 (DCR + PKCE), keyless ========
 // avots issues a real `av_mcp_…` access_token that works for BOTH the
 // OpenAI-compatible API and MCP, so one browser login configures the whole
 // agent without the user pasting a key. Agents only (capabilities.primary).
@@ -492,7 +492,7 @@ app.get('/oauth/avots/callback', async (req, res) => {
   }
   const { code, state, error: oauthError } = req.query;
 
-  // avots reported an error (e.g. user denied) — surface it gracefully.
+  // avots reported an error (e.g. user denied): surface it gracefully.
   if (oauthError) {
     const safe = String(oauthError).replace(/[^a-z0-9_-]/gi, '').slice(0, 40) || 'denied';
     return res.redirect(302, `/?avots_error=${encodeURIComponent(safe)}`);
@@ -537,9 +537,9 @@ app.get('/oauth/avots/callback', async (req, res) => {
 
   // Configure BOTH surfaces with the av_mcp_ token via the active adapter:
   //   primary → OpenAI provider (base_url maps to https://api.avots.ai/openai/v1)
-  //   MCP     → https://mcp.avots.ai/  — ONLY when the product exposes the mcp
-  //             capability AND adapter.addMcp exists (guarded below). OpenClaw has
-  //             mcp off today, so this configures the model side only.
+  //   MCP     → https://mcp.avots.ai/, ONLY when the product exposes the mcp
+  //             capability AND adapter.addMcp exists (guarded below). The openclaw
+  //             and hermes adapters both have it.
   try {
     if (typeof adapter.setPrimary === 'function') {
       await adapter.setPrimary('avots', accessToken, null, flow.model || undefined);
@@ -561,7 +561,7 @@ app.get('/oauth/avots/callback', async (req, res) => {
 });
 
 // === Feature 2: pricing in the model dropdown ==============================
-// GET /api/pricing — proxies the public avots pricing JSON with a ~1h in-memory
+// GET /api/pricing: proxies the public avots pricing JSON with a ~1h in-memory
 // cache. On any fetch failure returns { data: [] } so the UI degrades to plain
 // model ids. Pricing applies to avots only (other providers bill direct).
 const PRICING_URL = 'https://api.avots.ai/openai/v1/pricing';

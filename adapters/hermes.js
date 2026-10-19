@@ -1,36 +1,38 @@
 'use strict';
 /*
- * hermes adapter — Hermes Agent (Nous Research) per-client VM.
+ * hermes adapter: Hermes Agent (Nous Research) per-client VM.
  *
- * UNLIKE openclaw, this adapter does NOT shell out to a CLI. The panel runs in
- * an UNPRIVILEGED container that can only WRITE the shared data dir and then
- * `touch <data>/.apply-request`. A host-side systemd path unit watches that file
- * and runs `docker compose restart gateway`, so the agent re-reads the freshly
- * written config.yaml + .env at process start. (See /srv/ai-vms/hermes-vm.)
+ * Like the openclaw adapter, this adapter does NOT shell out to a CLI. The panel
+ * runs in an UNPRIVILEGED container that can only WRITE the shared data dir and
+ * then `touch <data>/.apply-request`. A host-side systemd path unit watches that
+ * file and runs `docker compose restart gateway`, so the agent re-reads the
+ * freshly written config.yaml + .env at process start. (See the hermes-vm
+ * repository.)
  *
  * Source of truth for the agent's secrets is therefore the DATA DIR:
- *   <data>/config.yaml  — non-secret model settings (provider/base_url/default),
+ *   <data>/config.yaml  - non-secret model settings (provider/base_url/default),
  *                         api_key referenced as ${OPENAI_API_KEY}.
- *   <data>/.env         — OPENAI_API_KEY, OPENAI_BASE_URL, TELEGRAM_BOT_TOKEN,
- *                         TELEGRAM_ALLOWED_USERS, and (optional) DISCORD_BOT_TOKEN.
- *   <data>/.apply-request — touched after each write to signal the host applier.
+ *   <data>/.env         - OPENAI_API_KEY, OPENAI_BASE_URL, TELEGRAM_BOT_TOKEN,
+ *                         TELEGRAM_ALLOWED_USERS, (optional) DISCORD_BOT_TOKEN,
+ *                         and one MCP_<NAME>_KEY per enabled MCP server.
+ *   <data>/.apply-request - touched after each write to signal the host applier.
  *
  * Env vars read:
- *   HERMES_DATA_DIR | DATA_DIR  — the shared data dir (default /opt/data, which is
- *                                 where docker-compose mounts ./data inside the
- *                                 panel container as /data; on the panel image the
- *                                 mount is /data, so deployments set DATA_DIR=/data).
+ *   HERMES_DATA_DIR | DATA_DIR  - the shared data dir (default /opt/data, the path
+ *                                 the agent container uses; the hermes-vm compose
+ *                                 mounts the same host ./data at /data in the panel
+ *                                 container and sets HERMES_DATA_DIR=/data).
  *
- * The agent surface (primary/messaging) maps onto the data-dir files. Fallback +
- * MCP capabilities are exposed but degrade gracefully (see notes below) because
- * upstream Hermes config support for them is not confirmed for this VM build.
+ * Primary model, messaging and MCP servers map onto the data-dir files. Fallback
+ * entries are saved in panel-state only; Hermes runs the primary model (see
+ * addFallback below).
  */
 const fs = require('fs');
 const path = require('path');
 
 // Where the shared data dir lives from the panel's point of view. The compose
-// file mounts the host ./data as /data inside the panel container; deployments
-// pass DATA_DIR=/data. Default to /opt/data to match the applier docs / task.
+// file mounts the host ./data as /data inside the panel container and sets
+// HERMES_DATA_DIR=/data. The default /opt/data is the agent container's path.
 const DATA_DIR = process.env.HERMES_DATA_DIR || process.env.DATA_DIR || '/opt/data';
 const CONFIG_FILE = path.join(DATA_DIR, 'config.yaml');
 const ENV_FILE = path.join(DATA_DIR, '.env');
@@ -74,7 +76,7 @@ function validateCustom(custom) {
   if (!custom || typeof custom !== 'object') return 'missing custom config';
   const { name, baseURL, modelId } = custom;
   if (!name || !/^[a-z0-9][a-z0-9_-]{0,31}$/i.test(name))
-    return 'invalid name (a–z, 0–9, dash, 1–32 chars)';
+    return 'invalid name (a-z, 0-9, dash, 1-32 chars)';
   if (!baseURL || !/^https?:\/\/[\w.-]+(:\d+)?(\/.*)?$/.test(baseURL))
     return 'invalid base URL (must start with http:// or https://)';
   if (!modelId || typeof modelId !== 'string' || modelId.trim().length < 1)
@@ -125,8 +127,9 @@ function hintOf(o, fullKey) {
 // --- data-dir read/merge helpers --------------------------------------------
 // We keep a tiny side-car JSON (panel-state.json) holding the structured view of
 // what the panel has configured, because config.yaml/.env are flat and we need
-// to re-emit them whole on every change. This file never holds the secret key in
-// plaintext beyond what already lives in .env (it stores only key tails + meta).
+// to re-emit them whole on every change. It holds the same API keys and bot
+// tokens that go into .env (the UI only shows a masked hint), so it is written
+// 0600 like .env.
 const STATE_FILE = path.join(DATA_DIR, 'panel-state.json');
 
 function loadState() {
@@ -362,7 +365,7 @@ function prunePending(platform, userId) {
 // state.approved[platform] holds users granted via the Access-requests queue.
 // Entries are objects { id, enabled, name }; legacy bare-id strings count as
 // enabled. Normalizing in place lets a granted user be DISABLED (remembered) and
-// re-ENABLED, like the other connected lists — not only added/removed.
+// re-ENABLED, like the other connected lists, not only added/removed.
 function normApprovedList(arr) {
   return (Array.isArray(arr) ? arr : []).map((e) =>
     (e && typeof e === 'object')
@@ -429,14 +432,14 @@ module.exports = {
   label: 'Hermes',
   repo: 'hermes-vm',   // GitHub repo (cloudhostinglv/<repo>) the updater git-pulls
 
-  // Agent surface. Primary + messaging are fully implemented via the data-dir
-  // mechanism. Fallback + MCP are exposed but degrade gracefully (TODO upstream).
+  // Agent surface. Primary, messaging and MCP are written to the data-dir files.
+  // Fallback entries are saved in panel-state only (see addFallback).
   capabilities: {
     primary: true,
-    fallback: true,   // exposed; see addFallback TODO (no confirmed Hermes mapping yet)
+    fallback: true,   // saved in panel-state; not written to config.yaml
     messaging: true,
     mcp: true,        // wired: addMcp writes mcp_servers + MCP_<NAME>_KEY env
-    pairing: true,    // native Hermes approval: list pending + approve via applier
+    pairing: true,    // Access requests: list pending, approve by user id (allowlist)
     openProduct: false,
     preconnect: true,
   },
@@ -594,11 +597,9 @@ module.exports = {
     };
   },
 
-  // Hermes (this VM build) has no confirmed multi-model fallback chain like the
-  // OpenClaw gateway. We persist the fallback in panel-state so the UI reflects it
-  // and re-apply, but mark it a TODO: until upstream support is confirmed, only the
-  // primary model is wired into config.yaml. The capability is left ON so the
-  // section renders; the response carries `todo` so the operator knows.
+  // The panel does not write a fallback chain for Hermes. A fallback is saved in
+  // panel-state so the UI lists it, but only the primary model is written to
+  // config.yaml. The response carries a `todo` note that says so.
   async addFallback(provider, apiKey, custom) {
     if (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)
       return { error: 'missing api key' };
@@ -676,7 +677,7 @@ module.exports = {
   async addMcp({ provider, apiKey, name: customName, url: customUrl }) {
     if (!MCPS[provider]) return { error: 'unknown mcp' };
     // Reuse-the-key: when adding the Avots MCP and no key is supplied, fall back
-    // to the avots primary's key — the same av_mcp_ token works for BOTH the
+    // to the avots primary's key: the same av_mcp_ token works for BOTH the
     // OpenAI API surface and the MCP surface, so the client needn't paste it twice.
     if (provider === 'avots' && (!apiKey || typeof apiKey !== 'string' || apiKey.length < 8)) {
       const st0 = loadState();
@@ -719,7 +720,7 @@ module.exports = {
   },
 
   // Turnkey avots: write config.yaml (provider=custom, avots base) + .env
-  // (OPENAI_API_KEY + OPENAI_BASE_URL) then request apply. Idempotent — if the
+  // (OPENAI_API_KEY + OPENAI_BASE_URL) then request apply. Idempotent: if the
   // primary is already set to an avots-backed config we skip rewriting the key.
   async preconnectAvots(key) {
     if (!key) return { preconnected: false, skipped: 'no-key' };

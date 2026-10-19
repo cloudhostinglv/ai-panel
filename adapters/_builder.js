@@ -1,6 +1,6 @@
 'use strict';
 /*
- * _builder.js — shared factory for the REDUCED "builder" adapters
+ * _builder.js: shared factory for the REDUCED "builder" adapters
  * (flowise / langflow / dify).
  *
  * Builders configure their LLM provider/key INSIDE the product's own web UI/API,
@@ -10,12 +10,12 @@
  * agent sections.
  *
  * Env vars read:
- *   PANEL_DOMAIN — public host the VM is served on. The panel sits on :8443, so
+ *   PANEL_DOMAIN - public host the VM is served on. The panel sits on :8443, so
  *                  the product's own UI is reachable on :443 at https://<domain>.
  *                  openProductUrl() returns https://${PANEL_DOMAIN} accordingly.
- *   AVOTS_API_KEY — only used to drive the "connected and ready" indicator via
- *                   preconnectAvots (a documented stub here; the real provider
- *                   wiring lives in the builder UI/API).
+ *   AVOTS_API_KEY - only used to drive the "connected and ready" indicator via
+ *                   preconnectAvots (it only reports the key here; the provider
+ *                   is configured in the builder's own UI).
  *
  * All agent methods are present (so server.js can route uniformly) but return a
  * gentle "not applicable for builder" notice rather than doing anything.
@@ -87,16 +87,11 @@ module.exports = function makeBuilder({ id, label, productPort }) {
     async addMcp()           { return na('addMcp'); },
     async removeMcp()        { return na('removeMcp'); },
 
-    // avots preconnect is a documented STUB for builders. The provider config for
-    // a builder lives in the product's own UI/API (Flowise credentials, Langflow
-    // global variables, Dify model providers). We can't push a key from here
-    // without product-specific API calls, so we just report the key's presence so
-    // the UI can show an honest "ready" indicator. Returning preconnected:true
-    // when a key exists keeps the turnkey UX; flip to a softer message if you'd
-    // rather not imply auto-config.
-    // TODO: implement per-product credential seeding via the builder API
-    //   (flowise: POST /api/v1/credentials; langflow: global variables;
-    //    dify: model-provider config) — see each VM's seed-credential script.
+    // For builders, avots preconnect only reports whether a key is present. The
+    // provider config for a builder lives in the product's own UI/API (Flowise
+    // credentials, Langflow global variables, Dify model providers), and the panel
+    // does not call those APIs. Returning preconnected:true when a key exists
+    // drives the "connected and ready" indicator.
     async preconnectAvots(key) {
       if (!key) return { preconnected: false, skipped: 'no-key' };
       return {

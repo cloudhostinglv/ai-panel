@@ -15,10 +15,9 @@
  * force, but the real guarantee is the signed cookie - there is no oracle beyond
  * a 401.
  *
- * Fail-safe: when PANEL_PASSWORD is unset the gate logs a loud warning and runs
- * OPEN (so local dev / preview still works). Every real deployment sets it, so
- * production is closed by default. Set PANEL_REQUIRE_AUTH=1 to hard-fail boot
- * instead of running open.
+ * Fail closed: when PANEL_PASSWORD is unset the panel refuses to start. Running
+ * without a login needs an explicit PANEL_ALLOW_OPEN=1 (trusted local testing
+ * only), and then logs a loud warning.
  */
 const crypto = require('crypto');
 const fs = require('fs');
@@ -56,9 +55,9 @@ function createAuth({ stateDir }) {
 
   if (!enabled) {
     // Fail CLOSED by default: the panel sets API keys and is published on a public
-    // :8443, so "no password" must not silently mean "no login". Running open now
-    // requires an explicit opt-in (PANEL_ALLOW_OPEN=1), which local dev/preview sets;
-    // every provisioned VM writes PANEL_PASSWORD, so production is never affected.
+    // :8443, so "no password" must not silently mean "no login". Running open
+    // requires an explicit opt-in (PANEL_ALLOW_OPEN=1) for trusted local testing;
+    // the VM compose always passes PANEL_PASSWORD.
     if (!truthy(process.env.PANEL_ALLOW_OPEN)) {
       console.error('[auth] PANEL_PASSWORD is not set - refusing to start open. ' +
         'Set PANEL_PASSWORD, or set PANEL_ALLOW_OPEN=1 for a trusted local run.');
@@ -73,8 +72,8 @@ function createAuth({ stateDir }) {
 
   // A short fingerprint of the current password, stamped into every session and
   // checked on verify. Rotating PANEL_PASSWORD changes this, so all outstanding
-  // cookies (7-day TTL) stop validating the moment the password changes — otherwise
-  // a leaked or shared session survived a password rotation for a week.
+  // cookies (7-day TTL) stop validating the moment the password changes, so a
+  // leaked or shared session does not outlive a password change.
   const passEpoch = crypto.createHmac('sha256', secret).update('pw:' + password).digest('hex').slice(0, 12);
 
   function loadOrCreateSecret(dir) {

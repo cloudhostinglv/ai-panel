@@ -808,7 +808,7 @@
       },
     };
     // English-only. The i18n machinery is kept (single `en` dictionary) so the
-    // data-i18n* markup hooks keep working; the language switcher was removed.
+    // data-i18n* markup hooks keep working.
     const currentLang = 'en';
     const T = (k) => (I18N.en[k] != null ? I18N.en[k] : k);
 
@@ -1082,7 +1082,7 @@
     let PRICING = {};        // id -> price record
     let PRICING_USD_PER_1000 = null;
     // The Avots model list, fetched ONLINE from /api/pricing (avots serves it live)
-    // so new/changed models — including FREE ones — show up automatically and prices
+    // so new/changed models, including FREE ones, show up automatically and prices
     // stay current. null until loaded; renderPrimaryModelOptions falls back to the
     // hardcoded PRIMARY_MODELS.avots when offline.
     let AVOTS_MODELS_ONLINE = null;
@@ -1151,7 +1151,7 @@
           : (list.includes(PRIMARY_MODELS.avots[0]) ? PRIMARY_MODELS.avots[0] : list[0]);
       }
       // Avots order: strictly by per-message price, most expensive first. FREE
-      // models (price 0) therefore sort to the bottom as the cheapest — consistent
+      // models (price 0) therefore sort to the bottom as the cheapest, consistent
       // with the desc ordering; the "· FREE" label keeps them easy to spot.
       // (Models with no known price sort last of all.)
       let ordered = list;
@@ -1418,8 +1418,8 @@
     }
 
     // Render the native "Access requests" queue (pending pairings). Each row is a
-    // person who messaged the bot but isn't approved yet; Approve runs the
-    // gateway's `hermes pairing approve <platform> <code>` (via the host applier).
+    // person who messaged the bot but isn't approved yet; Approve adds their user
+    // id to the channel allowlist and the agent restarts.
     // The card hides itself when the product has no pairing or nobody is waiting.
     function renderPairing(pairing, cap) {
       const card = $('pairing-card'); const list = $('pairingList');
@@ -1441,7 +1441,7 @@
             `${esc(T('pairingApprove'))}</button>` +
         `</div>`;
       }).join('');
-      // Granted users — reuse the connected-list renderer: each row gets an on/off
+      // Granted users: reuse the connected-list renderer: each row gets an on/off
       // switch (kind 'user' -> /api/toggle) and a remove button (-> /api/pairing/revoke).
       renderConfiguredList('grantedList', T('grantedTitle'), granted, '/api/pairing/revoke', 'user');
     }
@@ -1472,9 +1472,9 @@
     });
 
     // Delegated handler for the Approve buttons in the Access-requests queue.
-    // POST the {platform, code}; the adapter queues it for the host applier, which
-    // runs `hermes pairing approve ...` and restarts the gateway. We give it a
-    // moment, then reload status so the approved person drops off the queue.
+    // POST the {platform, userId}; the adapter adds the id to the allowlist and the
+    // host applier restarts the gateway. We give it a moment, then reload status
+    // so the approved person drops off the queue.
     document.addEventListener('click', async (e) => {
       const btn = e.target.closest('button.approve'); if (!btn) return;
       const platform = btn.dataset.approvePlatform, userId = btn.dataset.approveUser;
@@ -1695,7 +1695,7 @@
     };
 
     // True when the user is adding the Avots MCP and the primary AI is already
-    // Avots — then the same av_mcp_ key works for both, so no second key needed.
+    // Avots: then the same av_mcp_ key works for both, so no second key needed.
     function mcpAvotsReuse() {
       return $('mcpProvider') && $('mcpProvider').value === 'avots' && primaryProvider === 'avots';
     }
@@ -1804,7 +1804,7 @@
 
     // Trigger the update: POST /api/update (adapter writes .update-request, the host
     // updater git-pulls + docker compose pull/up). The panel container is recreated,
-    // so this page drops — show a notice and reload once it's likely back.
+    // so this page drops; show a notice and reload once it's likely back.
     $('updateBtn').addEventListener('click', async () => {
       const btn = $('updateBtn');
       if (!confirm(T('updateConfirm'))) return;
@@ -1857,7 +1857,7 @@
     loadPricing();                     // fetch avots pricing once; annotates the Avots model picker
     loadStatus().then(handleAvotsReturn);  // status first (sets CAPS) then process any OAuth return
     checkUpdates();                    // reveal the Update button if a newer build exists
-    setInterval(checkUpdates, 30 * 60 * 1000);  // re-check hourly-ish (cache is 1h server-side)
+    setInterval(checkUpdates, 30 * 60 * 1000);  // re-check every 30 min (GitHub answers are cached 1h server-side)
   </script>
 </body>
 </html>

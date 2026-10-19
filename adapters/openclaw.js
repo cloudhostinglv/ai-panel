@@ -1,32 +1,32 @@
 'use strict';
 /*
- * openclaw adapter — config-file model (mirrors the hermes adapter).
+ * openclaw adapter: config-file model (mirrors the hermes adapter).
  *
- * UNLIKE the old native build, this adapter does NOT shell out to the `openclaw`
- * CLI / `systemctl --user`. The panel runs in an UNPRIVILEGED container that can
- * only WRITE the shared config dir and `touch <dir>/.apply-request`; a host-side
- * applier then runs `docker compose restart openclaw-gateway` so the gateway
- * re-reads the freshly written openclaw.json + .env at start. (See
- * /srv/ai-vms/openclaw-vm. The previous native adapter is kept as
- * openclaw.js.native.bak.)
+ * This adapter does NOT shell out to the `openclaw` CLI or `systemctl`. The panel
+ * runs in an UNPRIVILEGED container that can only WRITE the shared config dir and
+ * `touch <dir>/.apply-request`; a host-side applier then runs
+ * `docker compose restart openclaw-gateway` so the gateway re-reads the freshly
+ * written openclaw.json + .env at start. (See the openclaw-vm repository.)
  *
  * Source of truth for the agent is the shared OpenClaw config dir (~/.openclaw):
- *   <dir>/openclaw.json   — gateway + models.providers + agents.defaults
+ *   <dir>/openclaw.json   - gateway + models.providers + agents.defaults
  *                           (model.primary + allowlist + sandbox) + tools policy
- *                           + channels (allowFrom = owner ids). Secrets are
- *                           referenced as ${VAR}.
- *   <dir>/.env            — AVOTS_API_KEY (+ other provider keys), the channel
- *                           bot tokens, and OPENCLAW_GATEWAY_TOKEN (preserved).
- *   <dir>/.apply-request  — touched after each write to signal the host applier.
- *   <dir>/panel-state.json — the panel's structured view (provider/key meta,
+ *                           + channels (allowFrom = owner ids) + mcp.servers.
+ *                           Secrets are referenced as ${VAR}.
+ *   <dir>/.env            - AVOTS_API_KEY (+ other provider keys), the channel
+ *                           bot tokens, one MCP_<NAME>_KEY per MCP server, and
+ *                           OPENCLAW_GATEWAY_TOKEN (preserved).
+ *   <dir>/.apply-request  - touched after each write to signal the host applier.
+ *   <dir>/panel-state.json - the panel's structured view (provider/key meta,
  *                           enabled flags, allowFrom ids). NOTE: this file DOES hold
  *                           the full API keys / bot tokens in cleartext (the panel
  *                           re-emits them into .env on every apply). Only the masked
  *                           keyHint is shown in the UI, but at rest the secret is here
- *                           too — treat it exactly like .env (0600, same care).
+ *                           too, so treat it exactly like .env (0600, same care).
  *
- * Env: OPENCLAW_DATA_DIR | OPENCLAW_CONFIG_DIR — the shared dir as the panel sees
- * it (the compose mounts the host ~/.openclaw here; default /data).
+ * Env: OPENCLAW_DATA_DIR | OPENCLAW_CONFIG_DIR - the shared dir as the panel sees
+ * it (default /data; the compose mounts the same host ./data that the gateway
+ * sees as ~/.openclaw).
  *
  * OpenClaw access model is OWNER-LOCK: a channel only answers the ids in
  * channels.<type>.allowFrom. The messaging "Allowed users" field maps directly to
@@ -87,7 +87,7 @@ function channelTokenEnv(type) {
   return type === 'discord' ? 'DISCORD_BOT_TOKEN' : 'TELEGRAM_BOT_TOKEN';
 }
 
-// Built-in remote MCP catalog — mirrors LOCAL_MCPS in public/index.html. A built-in
+// Built-in remote MCP catalog, mirrors LOCAL_MCPS in public/index.html. A built-in
 // provider posts only { provider, apiKey }; the adapter resolves the name (= provider
 // id) and url from here. 'custom' carries a user-supplied name + url.
 //
@@ -113,7 +113,7 @@ function mcpEnvName(name) {
 }
 
 // A secret that will be written verbatim into .env must not contain a control
-// character — a newline would inject its own line. Reject at the INPUT boundary so a
+// character: a newline would inject its own line. Reject at the INPUT boundary so a
 // bad value never reaches state (writeEnvUpdates is the belt-and-braces backstop).
 function badSecret(v) {
   return typeof v !== 'string' || /[\x00-\x1f\x7f]/.test(v);
@@ -144,7 +144,7 @@ function hintOf(o, fullKey) {
 // Source of truth is ONLINE: the avots /models catalog (OpenRouter-style) is
 // queried with the configured key and we read each model's input modalities.
 // When that's unavailable (non-avots provider, network error, or the field is
-// absent) we fall back to a conservative name heuristic — default TEXT-ONLY
+// absent) we fall back to a conservative name heuristic: default TEXT-ONLY
 // (safe: at worst a vision model loses image support, never a crash), flag only
 // known vision families.
 function visionHeuristic(modelId) {
@@ -198,7 +198,7 @@ async function avotsVisionMap(apiKey) {
     }
   } catch (_) { /* offline / shape change -> fall through, DON'T cache the empty map */ }
   // Cache only a real answer for the full hour. A transient failure returns an empty
-  // map used once (heuristic fallback), but is NOT cached — otherwise one blip would
+  // map used once (heuristic fallback), but is NOT cached; otherwise one blip would
   // degrade vision detection for every model for an hour.
   if (ok) _modelsCache = { at: now, map };
   return map;
@@ -238,7 +238,7 @@ function validateCustom(custom) {
 // The gateway (not the panel) calls this URL, so it must not point at the host's own
 // metadata service or an internal address. Require https and block loopback,
 // link-local, the cloud metadata IP, and RFC1918 ranges. A hostname we cannot judge
-// statically (a real domain) is allowed — the point is to stop obvious SSRF targets.
+// statically (a real domain) is allowed; the point is to stop obvious SSRF targets.
 function validateBaseUrl(baseURL) {
   let u;
   try { u = new URL(baseURL); } catch (_) { return 'invalid base URL'; }
@@ -294,7 +294,7 @@ function resolveProvider(provider, custom, modelOverride) {
 // Every writer goes through writeAtomic: write a sibling temp file, fsync, then
 // rename into place. rename() is atomic on the same filesystem, so the gateway
 // (restarted the instant .apply-request appears) never reads a half-written
-// openclaw.json / .env — the old fs.writeFileSync could be caught mid-write.
+// openclaw.json / .env.
 function writeAtomic(file, data, mode) {
   fs.mkdirSync(path.dirname(file), { recursive: true });
   const tmp = `${file}.tmp.${process.pid}.${TMP_SEQ++}`;
@@ -313,10 +313,8 @@ function saveState(s) {
 }
 
 // readEnv/writeEnv preserve the ORIGINAL file. The panel manages only its own
-// KEY=VALUE lines; anything else — comments, `export FOO=…`, OPENCLAW_GATEWAY_TOKEN,
-// pre-seeded provider keys, blank lines — is kept verbatim. The old version
-// reconstructed the file from a flat map, which silently dropped every line it did
-// not recognise (and dropped any managed key whose value went empty).
+// KEY=VALUE lines; anything else (comments, `export FOO=…`, OPENCLAW_GATEWAY_TOKEN,
+// pre-seeded provider keys, blank lines) is kept verbatim.
 function readEnv() {
   const out = {};
   try {
@@ -411,7 +409,7 @@ function writeConfig(state) {
         id: p.model,
         name: (p.label || pid) + ' ' + p.model,
         // image ONLY for vision-capable models (resolved online when added,
-        // heuristic fallback) — declaring it for a text model breaks photo input.
+        // heuristic fallback); declaring it for a text model breaks photo input.
         input: visionFor(p) ? ['text', 'image'] : ['text'],
         contextWindow: DEFAULT_CONTEXT_WINDOW,
         maxTokens: DEFAULT_MAX_TOKENS,
@@ -527,7 +525,7 @@ function applyAll(state, reason) {
 // Entries are objects { id, enabled, name }; legacy bare-id strings count as
 // enabled. Normalizing in place lets every caller rely on the object shape and
 // lets a granted user be DISABLED (remembered) and re-ENABLED, like the other
-// connected lists — rather than only added/removed.
+// connected lists, rather than only added/removed.
 function normApprovedList(arr) {
   return (Array.isArray(arr) ? arr : []).map((e) =>
     (e && typeof e === 'object')
@@ -647,7 +645,7 @@ function listPairing() {
   }
   const rows = [...byUser.values()].sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
 
-  // Hide anyone the panel already considers GRANTED for that platform — either
+  // Hide anyone the panel already considers GRANTED for that platform, either
   // Approved earlier (state.approved[platform]) or listed in the channel's
   // "Allowed users". OpenClaw owns the pairing file and may leave a stale entry
   // behind even after access is granted (e.g. the owner who messaged before being
@@ -689,9 +687,9 @@ module.exports = {
 
   capabilities: {
     primary: true,
-    fallback: true,    // recorded + allowlisted; auto-fallback chain TODO (verify on live VM)
+    fallback: true,    // saved + added to the model allowlist; no automatic fallback order is written
     messaging: true,
-    mcp: true,         // remote MCP servers -> mcpServers block in openclaw.json (schema verified live)
+    mcp: true,         // remote MCP servers -> mcp.servers in openclaw.json
     pairing: true,     // Access requests: read <data>/credentials/<ch>-pairing.json, Approve -> allowFrom
     openProduct: false,
     preconnect: true,
@@ -828,7 +826,7 @@ module.exports = {
     // Same-family guard (mirrors addFallback): a primary and a fallback of the same
     // provider family share ONE env var, and applyAll writes fallbacks LAST, so a primary
     // set after a same-family fallback would silently run on the FALLBACK's key. Refuse so
-    // the operator removes the stale fallback first (the OAuth "Connect Avots" turnkey also
+    // the user removes the stale fallback first (the OAuth "Connect Avots" turnkey also
     // lands here, so this closes that path too).
     const st0 = loadState();
     if ((st0.fallbacks || []).some((e) => e && e.envRef === r.envRef && e.apiKey && e.apiKey !== primKey)) {
@@ -863,9 +861,8 @@ module.exports = {
     const vision = await resolveVision(r.providerId, r.model, key);
     const st = loadState();
     st.fallbacks = st.fallbacks || [];
-    // Unique id per entry: removeFallback/setEnabled used to match by f.model, so two
-    // fallbacks sharing a model (same model, different provider/key) were removed or
-    // toggled together. Key operations off this id instead.
+    // Unique id per entry, so two fallbacks sharing a model (same model, different
+    // provider/key) are removed or toggled independently by removeFallback/setEnabled.
     st.fallbacks.push({ id: genId(), provider: r.provider, providerId: r.providerId, label: r.label, model: r.model, baseURL: r.baseURL, envRef: r.envRef, apiKey: key, keyTail: key.slice(-3), keyHint: maskKey(key), vision, enabled: true });
     saveState(st);
     const apply = applyAll(st, 'add-fallback');
@@ -930,7 +927,7 @@ module.exports = {
   // Attach a remote MCP server (extra agent tools). Built-in providers post only
   // { provider, apiKey } and the name/url come from MCPS; 'custom' carries its own
   // name + url. The full key is stored in state and applyAll wires it into .env as
-  // MCP_<NAME>_KEY, referenced from openclaw.json's mcpServers.<name> Bearer header.
+  // MCP_<NAME>_KEY, referenced from openclaw.json's mcp.servers.<name> Bearer header.
   async addMcp({ provider, apiKey, name: customName, url: customUrl } = {}) {
     if (!MCPS[provider]) return { error: 'unknown mcp' };
     // Reuse-the-key: the avots MCP with no pasted key falls back to the avots primary's
@@ -964,7 +961,7 @@ module.exports = {
       return { error: 'that name collides with an existing MCP; pick a different name' };
     }
     // Dedupe by name: re-adding the same MCP REPLACES the prior entry (else applyAll
-    // would emit a duplicate mcpServers.<name> key / a stale MCP_<NAME>_KEY).
+    // would emit a duplicate mcp.servers.<name> key / a stale MCP_<NAME>_KEY).
     st.mcps = (st.mcps || []).filter((x) => x && x.name !== name);
     st.mcps.push({ name, url, apiKey: key, keyTail: key.slice(-3), keyHint: maskKey(key), enabled: true });
     saveState(st);

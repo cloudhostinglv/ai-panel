@@ -6,7 +6,7 @@
  * offline against real files; no network, no VM.
  *
  * These lock in behaviour that was verified against the shipped OpenClaw image
- * (ghcr.io/openclaw/openclaw:2026.6.1) — most importantly the MCP config SHAPE. A stray
+ * (ghcr.io/openclaw/openclaw:2026.6.1), most importantly the MCP config SHAPE. A stray
  * top-level `mcpServers` key is not a cosmetic slip: OpenClaw's root schema is strict, so
  * it rejects the ENTIRE openclaw.json ("Unrecognized key") and takes the gateway, models
  * and channels down with it. Test 9 guards that specifically. Re-verify with:
